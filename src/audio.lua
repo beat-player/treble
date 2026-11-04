@@ -4,6 +4,7 @@ local Wav = require("treble.formats.wav")
 local Flac = require("treble.formats.flac")
 local Mp3 = require("treble.formats.mp3")
 local Opus = require("treble.formats.opus")
+local Inspect = require("treble.inspect")
 
 -- Enough to hold the magic bytes and, for opus, the header packet.
 local SNIFF_SIZE = 64
@@ -35,6 +36,7 @@ local function detect(content)
 end
 
 ---@class treble.audio
+---@field inspect fun(path: string): treble.audio.Inspect?, string?
 local audio = {}
 
 --- Opens a file as a source, picking the decoder from its first bytes.
@@ -142,5 +144,7 @@ end
 function audio.isValid(content)
 	return detect(string.sub(content, 1, SNIFF_SIZE)) ~= nil
 end
+
+audio.inspect = Inspect.inspect
 
 return audio

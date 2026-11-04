@@ -29,7 +29,6 @@ local Tags = {}
 local LATIN1 = 0
 local UTF16 = 1
 local UTF16_BE = 2
-local UTF8 = 3
 
 ---@param value number
 ---@return string
@@ -168,7 +167,6 @@ local function applyFrame(tags, frame, raw)
 		tags.genre = trim(text:gsub("^%(%d+%)", ""))
 	elseif frame == "COMM" or frame == "COM" then
 		-- A comment frame carries a language and a short description first.
-		local _, rest = takeText(string.sub(text, 1, 3), LATIN1)
 		local body = string.sub(string.sub(raw, 2), 4)
 		local short, description = takeText(body, encoding)
 

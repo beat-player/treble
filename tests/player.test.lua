@@ -31,15 +31,15 @@ local function ramp(opts)
 	local parts = {}
 
 	for i = 0, opts.frames * channels - 1 do
-		local sample = opts.value ~= nil and opts.value(i) or i
-		parts[#parts + 1] = ffi.string(Int16(sample), 2)
-	end
+			local sample = opts.value ~= nil and opts.value(i) or i
+			parts[#parts + 1] = ffi.string(Int16(sample), 2)
+		end
 
 	return open(fixture.build({
-		sampleRate = opts.sampleRate or 8000,
-		channels = channels,
-		frames = opts.frames,
-		sampleBytes = table.concat(parts),
+	sampleRate = opts.sampleRate or 8000,
+	channels = channels,
+	frames = opts.frames,
+	sampleBytes = table.concat(parts),
 	}))
 end
 
@@ -67,19 +67,19 @@ end
 ---@param steps number?
 local function run(player, created, steps)
 	for _ = 1, (steps or 60) do
-		player:update()
+			player:update()
 
-		for _, stream in ipairs(created) do
-			stream:play(stream.queued)
+			for _, stream in ipairs(created) do
+					stream:play(stream.queued)
+				end
 		end
-	end
 end
 
 test.it("writes a whole track to the device", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 2000 }))
+	player:enqueue(ramp({ frames = 2000}))
 	player:play()
 	run(player, created)
 
@@ -89,9 +89,9 @@ end)
 
 test.it("hands the frames over unchanged at full volume", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 100 }))
+	player:enqueue(ramp({ frames = 100}))
 	player:play()
 	run(player, created)
 
@@ -102,10 +102,10 @@ end)
 
 test.it("scales frames by the volume", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
 	player:setVolume(0.5)
-	player:enqueue(ramp({ frames = 100 }))
+	player:enqueue(ramp({ frames = 100}))
 	player:play()
 	run(player, created)
 
@@ -116,14 +116,14 @@ end)
 
 test.it("clamps a boosted frame instead of wrapping it", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
 	player:setVolume(1.5)
 	player:enqueue(ramp({
-		frames = 4,
-		value = function()
-			return 32000
-		end,
+	frames = 4,
+	value = function()
+		return 32000
+	end,
 	}))
 	player:play()
 	run(player, created)
@@ -132,7 +132,7 @@ test.it("clamps a boosted frame instead of wrapping it", function()
 end)
 
 test.it("caps the volume at 1.5", function()
-	local player = Player.new({ stream = factory() })
+	local player = Player.new({ stream = factory()})
 	player:setVolume(4)
 
 	test.equal(player.volume, 1.5)
@@ -140,15 +140,15 @@ end)
 
 test.it("plays the queue in order and reports each track", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
 	local ended = 0
 	player.onTrackEnd = function()
 		ended = ended + 1
 	end
 
-	player:enqueue(ramp({ frames = 500 }))
-	player:enqueue(ramp({ frames = 300 }))
+	player:enqueue(ramp({ frames = 500}))
+	player:enqueue(ramp({ frames = 300}))
 	player:play()
 	run(player, created)
 
@@ -158,27 +158,27 @@ test.it("plays the queue in order and reports each track", function()
 end)
 
 test.it("hands the next track to the device while the first is unplayed", function()
-	local create, created = factory({ capacity = 8000, total = 40000 })
-	local player = Player.new({ stream = create })
+	local create, created = factory({ capacity = 8000, total = 40000})
+	local player = Player.new({ stream = create})
 
 	local ended = 0
 	player.onTrackEnd = function()
 		ended = ended + 1
 	end
 
-	player:enqueue(ramp({ frames = 3000 }))
+	player:enqueue(ramp({ frames = 3000}))
 	player:enqueue(ramp({
-		frames = 3000,
-		value = function(index)
-			return index + 10000
-		end,
+	frames = 3000,
+	value = function(index)
+		return index + 10000
+	end,
 	}))
 	player:play()
 
 	-- fill the device without letting it play anything yet
 	for _ = 1, 8 do
-		player:update()
-	end
+			player:update()
+		end
 
 	local stream = created[1]
 	test.equal(stream.queued, stream.writtenFrames, "nothing has been heard")
@@ -190,14 +190,14 @@ end)
 
 test.it("skips to the next queued track", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 4000 }))
+	player:enqueue(ramp({ frames = 4000}))
 	player:enqueue(ramp({
-		frames = 1000,
-		value = function(index)
-			return index + 10000
-		end,
+	frames = 1000,
+	value = function(index)
+		return index + 10000
+	end,
 	}))
 	player:play()
 	player:update()
@@ -215,10 +215,10 @@ test.it("skips to the next queued track", function()
 end)
 
 test.it("does not skip past the end of the queue", function()
-	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local create = factory()
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 200 }))
+	player:enqueue(ramp({ frames = 200}))
 	player:play()
 	player:update()
 
@@ -227,9 +227,9 @@ end)
 
 test.it("reports the position from the device", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 8000 }))
+	player:enqueue(ramp({ frames = 8000}))
 	player:play()
 	player:update()
 
@@ -243,9 +243,9 @@ end)
 
 test.it("seeks, drops what the device held, and plays on from there", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 8000 }))
+	player:enqueue(ramp({ frames = 8000}))
 	player:play()
 	player:update()
 
@@ -260,9 +260,40 @@ test.it("seeks, drops what the device held, and plays on from there", function()
 	test.equal(stream.written[before], 4000, "the write after the seek comes from the target frame")
 end)
 
+test.it("seeks to absolute seconds after an earlier seek", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000}))
+	player:play()
+	player:update()
+
+	local stream = created[1]
+	test.truthy(player:seek(0.5), "the first seek reports success")
+	test.truthy(player:seek(0.25), "the second seek reports success")
+	test.equal(player:position(), 0.25, "the second seek is measured from the start of the track")
+
+	local before = stream.writtenFrames
+	player:update()
+	test.equal(stream.written[before], 2000, "and reads from that absolute frame")
+end)
+
+test.it("keeps a seek made before the first update", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000}))
+	player:play()
+	test.truthy(player:seek(0.5), "a seek before adoption is kept")
+	player:update()
+
+	local stream = created[1]
+	test.equal(stream.written[0], 4000, "the first write starts at the seeked frame instead of nought")
+end)
+
 test.it("reports the duration of the current track", function()
-	local player = Player.new({ stream = factory() })
-	player:enqueue(ramp({ frames = 22050, sampleRate = 44100 }))
+	local player = Player.new({ stream = factory()})
+	player:enqueue(ramp({ frames = 22050, sampleRate = 44100}))
 	player:update()
 
 	test.equal(player:duration(), 0.5)
@@ -270,9 +301,9 @@ end)
 
 test.it("stops writing while paused and picks up again", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 8000 }))
+	player:enqueue(ramp({ frames = 8000}))
 	player:play()
 	player:update()
 
@@ -295,9 +326,9 @@ end)
 
 test.it("releases the device once the queue is empty and the device is quiet", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 1000 }))
+	player:enqueue(ramp({ frames = 1000}))
 	player:play()
 	run(player, created)
 	player:update()
@@ -307,10 +338,10 @@ end)
 
 test.it("opens a stream per sample rate", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 100 }))
-	player:enqueue(ramp({ frames = 100, sampleRate = 22050 }))
+	player:enqueue(ramp({ frames = 100}))
+	player:enqueue(ramp({ frames = 100, sampleRate = 22050}))
 	player:play()
 	run(player, created)
 
@@ -321,9 +352,9 @@ end)
 
 test.it("stops, rewinds, and closes the device", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 8000 }))
+	player:enqueue(ramp({ frames = 8000}))
 	player:play()
 	player:update()
 	player:seek(0.25)
@@ -339,10 +370,10 @@ test.it("stops, rewinds, and closes the device", function()
 end)
 
 test.it("plays a whole track through pump without a frame loop", function()
-	local create, created = factory({ isBlocking = true, total = 20000 })
-	local player = Player.new({ stream = create })
+	local create, created = factory({ isBlocking = true, total = 20000})
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 8000 }))
+	player:enqueue(ramp({ frames = 8000}))
 	player:play()
 	player:pump()
 
@@ -351,16 +382,16 @@ test.it("plays a whole track through pump without a frame loop", function()
 end)
 
 test.it("pumps the whole queue and reports tracks as they are heard", function()
-	local create, created = factory({ isBlocking = true, total = 20000 })
-	local player = Player.new({ stream = create })
+	local create, created = factory({ isBlocking = true, total = 20000})
+	local player = Player.new({ stream = create})
 
 	local ended = 0
 	player.onTrackEnd = function()
 		ended = ended + 1
 	end
 
-	player:enqueue(ramp({ frames = 1000 }))
-	player:enqueue(ramp({ frames = 500 }))
+	player:enqueue(ramp({ frames = 1000}))
+	player:enqueue(ramp({ frames = 500}))
 	player:play()
 	player:pump()
 
@@ -378,9 +409,9 @@ end)
 
 test.it("reports when it has nothing left and the device is quiet", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
-	player:enqueue(ramp({ frames = 500 }))
+	player:enqueue(ramp({ frames = 500}))
 	player:play()
 	test.falsy(player:isFinished(), "a queued track is not finished")
 
@@ -392,20 +423,20 @@ end)
 
 test.it("reports a failing source and plays the next track", function()
 	local create, created = factory()
-	local player = Player.new({ stream = create })
+	local player = Player.new({ stream = create})
 
 	local broken = {
-		channels = 1,
-		sampleRate = 8000,
-		frameCount = 1000,
-		read = function()
-			return nil, "the file went away"
-		end,
-		seek = function()
-			return true
-		end,
-		close = function()
-		end,
+	channels = 1,
+	sampleRate = 8000,
+	frameCount = 1000,
+	read = function()
+		return nil, "the file went away"
+	end,
+	seek = function()
+		return true
+	end,
+	close = function()
+	end,
 	}
 
 	local errors = {}
@@ -419,7 +450,7 @@ test.it("reports a failing source and plays the next track", function()
 	end
 
 	player:enqueue(broken)
-	player:enqueue(ramp({ frames = 500 }))
+	player:enqueue(ramp({ frames = 500}))
 	player:play()
 	run(player, created)
 
@@ -431,9 +462,9 @@ end)
 
 test.it("reports a device it cannot open without raising when onError is set", function()
 	local player = Player.new({
-		stream = function()
-			return nil, "WASAPI playback is not implemented"
-		end,
+	stream = function()
+		return nil, "WASAPI playback is not implemented"
+	end,
 	})
 
 	local errors = {}
@@ -441,7 +472,7 @@ test.it("reports a device it cannot open without raising when onError is set", f
 		errors[#errors + 1] = err
 	end
 
-	player:enqueue(ramp({ frames = 100 }))
+	player:enqueue(ramp({ frames = 100}))
 	player:play()
 
 	local ok = pcall(function()
@@ -455,11 +486,11 @@ end)
 
 test.it("reports a device it cannot open", function()
 	local player = Player.new({
-		stream = function()
-			return nil, "WASAPI playback is not implemented"
-		end,
+	stream = function()
+		return nil, "WASAPI playback is not implemented"
+	end,
 	})
-	player:enqueue(ramp({ frames = 100 }))
+	player:enqueue(ramp({ frames = 100}))
 	player:play()
 
 	local ok, err = pcall(function()

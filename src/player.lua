@@ -7,6 +7,7 @@
 -- decoder runs out, so the position and onTrackEnd follow what is audible.
 local ffi = require("ffi")
 local Audio = require("treble.audio")
+local Equalizer = require("treble.equalizer")
 local output = require("treble.output")
 
 local SampleBuffer = ffi.typeof("int16_t[?]")
@@ -36,7 +37,9 @@ local STAGING_SECONDS = 0.25
 ---@class treble.Player
 ---@field onTrackEnd fun()? # Called when a track has played out
 ---@field onError fun(err: string)? # Called when a source or the device fails
+---@field onSamples fun(samples: ffi.cdata*, frames: number, channels: number)? # Decoded PCM, after equalizer and volume
 ---@field volume number
+---@field private equalizer treble.Equalizer?
 ---@field private queue treble.Player.QueueItem[]
 ---@field private playing treble.Player.Track? # The track the device is hearing
 ---@field private decoding treble.Player.Track? # The track being decoded ahead of it
@@ -45,37 +48,41 @@ local STAGING_SECONDS = 0.25
 ---@field private device string?
 ---@field private staging ffi.cdata*
 ---@field private stagingCapacity number
+---@field private stagingSeconds number # How much decoded audio is held between frames
 ---@field private stagedOffset number
 ---@field private stagedFrames number
 ---@field private framesWritten number # Cumulative, in the device timeline
 ---@field private isPaused boolean
 ---@field private isStopped boolean
+---@field private pendingSeek number? # A seek asked for before the next track is adopted
 local Player = {}
 Player.__index = Player
 
----@param opts { stream: treble.Player.StreamFactory?, device: string? }? # stream defaults to this platform's backend
+---@param opts { stream: treble.Player.StreamFactory?, device: string?, stagingSeconds: number? }? # stream defaults to this platform's backend
 ---@return treble.Player
 function Player.new(opts)
 	opts = opts or {}
 
 	---@type treble.Player
 	local player = setmetatable({
-		onTrackEnd = nil,
-		onError = nil,
-		volume = 1,
-		queue = {},
-		playing = nil,
-		decoding = nil,
-		stream = nil,
-		streamFactory = opts.stream or output.open,
-		device = opts.device,
-		staging = nil,
-		stagingCapacity = 0,
-		stagedOffset = 0,
-		stagedFrames = 0,
-		framesWritten = 0,
-		isPaused = false,
-		isStopped = false,
+	onTrackEnd = nil,
+	onError = nil,
+	volume = 1,
+	queue = {},
+	playing = nil,
+	decoding = nil,
+	stream = nil,
+	streamFactory = opts.stream or output.open,
+	device = opts.device,
+	staging = nil,
+	stagingCapacity = 0,
+	stagingSeconds = opts.stagingSeconds or STAGING_SECONDS,
+	stagedOffset = 0,
+	stagedFrames = 0,
+	framesWritten = 0,
+	isPaused = false,
+	isStopped = false,
+	pendingSeek = nil,
 	}, Player)
 
 	return player
@@ -85,7 +92,7 @@ end
 --- hold every file open.
 ---@param item string|treble.Source
 function Player:enqueue(item)
-	self.queue[#self.queue + 1] = { item = item, isOwned = false }
+	self.queue[#self.queue + 1] = { item = item, isOwned = false}
 
 	return self
 end
@@ -124,16 +131,30 @@ function Player:adopt()
 	elseif not isOwned then
 		source:seek(0)
 	end
+	---@cast source treble.Source
 
 	---@type treble.Player.Track
 	local track = {
-		source = source,
-		isOwned = isOwned,
-		startFrame = self.framesWritten + self.stagedFrames,
-		frames = source.frameCount,
-		sourceStart = 0,
-		isDone = false,
+	source = source,
+	isOwned = isOwned,
+	startFrame = self.framesWritten + self.stagedFrames,
+	frames = source.frameCount,
+	sourceStart = 0,
+	isDone = false,
 	}
+
+	-- A seek made while no track was adopted is held until this one is: it is what lets a queue
+	-- order change carry on at the same point instead of starting the source at nought.
+	local pendingSeek = self.pendingSeek
+	self.pendingSeek = nil
+	if pendingSeek ~= nil then
+		local frame = math.floor(pendingSeek * source.sampleRate)
+		frame = math.max(0, math.min(frame, source.frameCount))
+		if source:seek(frame) then
+			track.sourceStart = frame
+			track.frames = source.frameCount - frame
+		end
+	end
 
 	-- The track that follows the one the device is hearing is the one to decode.
 	if self.playing == nil then
@@ -143,7 +164,7 @@ function Player:adopt()
 	end
 
 	if self.staging == nil or self.stagingCapacity == 0 then
-		self.stagingCapacity = math.max(1, math.floor(source.sampleRate * STAGING_SECONDS))
+		self.stagingCapacity = math.max(1, math.floor(source.sampleRate * self.stagingSeconds))
 		self.staging = SampleBuffer(self.stagingCapacity * source.channels)
 	end
 
@@ -209,7 +230,7 @@ end
 ---@param source treble.Source
 function Player:needsNewStream(source)
 	return self.stream ~= nil
-		and (self.stream.sampleRate ~= source.sampleRate or self.stream.channels ~= source.channels)
+	and (self.stream.sampleRate ~= source.sampleRate or self.stream.channels ~= source.channels)
 end
 
 ---@param samples ffi.cdata*
@@ -221,9 +242,9 @@ function Player:applyVolume(samples, count)
 	end
 
 	for i = 0, count - 1 do
-		-- Scaling past the sample range wraps the sign, which sounds like noise.
-		samples[i] = math.max(MIN_SAMPLE, math.min(MAX_SAMPLE, math.floor(samples[i] * gain)))
-	end
+			-- Scaling past the sample range wraps the sign, which sounds like noise.
+			samples[i] = math.max(MIN_SAMPLE, math.min(MAX_SAMPLE, math.floor(samples[i] * gain)))
+		end
 end
 
 --- Decodes ahead into the staging buffer. A source may give back fewer frames than
@@ -272,13 +293,19 @@ function Player:fill()
 			return
 		end
 
+		if self.equalizer ~= nil then
+			self.equalizer:process(samples, frames, channels, track.source.sampleRate)
+		end
 		self:applyVolume(samples, frames * channels)
+		if self.onSamples ~= nil then self.onSamples(samples, frames, channels) end
 		self.stagedFrames = self.stagedFrames + frames
 	end
 end
 
 ---@param isBlocking boolean
 function Player:writeStaged(isBlocking)
+	local stream = self.stream
+	if stream == nil then return end
 	local channels = self.playing ~= nil and self.playing.source.channels or 1
 	if self.decoding ~= nil then
 		channels = self.decoding.source.channels
@@ -286,14 +313,14 @@ function Player:writeStaged(isBlocking)
 
 	local frames = self.stagedFrames
 	if not isBlocking then
-		frames = math.min(self.stream:avail(), frames)
+		frames = math.min(stream:avail(), frames)
 	end
 
 	if frames == 0 then
 		return
 	end
 
-	local written = self.stream:write(self.staging + self.stagedOffset * channels, frames)
+	local written = stream:write(self.staging + self.stagedOffset * channels, frames)
 
 	self.stagedOffset = self.stagedOffset + written
 	self.stagedFrames = self.stagedFrames - written
@@ -305,7 +332,7 @@ function Player:isFeeding()
 	local active = self.decoding or self.playing
 
 	return self.stagedFrames > 0 or (#self.queue > 0 and not self.isStopped and not self.isPaused)
-		or (active ~= nil and not active.isDone)
+	or (active ~= nil and not active.isDone)
 end
 
 --- One step of playback: pull, then push. Call it once per frame.
@@ -504,29 +531,32 @@ function Player:stop()
 	self.framesWritten = 0
 	self.isPaused = false
 	self.isStopped = true
+	self.pendingSeek = nil
 
 	return self
 end
 
 --- Drops everything and closes what the player opened.
 function Player:close()
+	self.pendingSeek = nil
+	if self.equalizer ~= nil then self.equalizer:reset() end
 	if self.stream ~= nil then
 		self.stream:close()
 		self.stream = nil
 	end
 
-	for _, track in ipairs({ self.playing, self.decoding }) do
-		if track ~= nil and track.isOwned then
-			track.source:close()
+	for _, track in ipairs({ self.playing, self.decoding}) do
+			if track ~= nil and track.isOwned then
+				track.source:close()
+			end
 		end
-	end
 
 	for _, queued in ipairs(self.queue) do
-		local item = queued.item
-		if queued.isOwned and type(item) ~= "string" then
-			item:close()
+			local item = queued.item
+			if queued.isOwned and type(item) ~= "string" then
+				item:close()
+			end
 		end
-	end
 
 	self.queue = {}
 	self.playing = nil
@@ -542,12 +572,16 @@ end
 function Player:seek(seconds)
 	local track = self.playing
 	if track == nil then
-		return false
+		self.pendingSeek = seconds
+		return true
 	end
 
 	local source = track.source
-	local frame = math.floor(seconds * source.sampleRate) + track.sourceStart
-	frame = math.max(track.sourceStart, math.min(frame, source.frameCount))
+	-- Seconds are into the track, and the source is a decode of that whole track: an earlier
+	-- seek moved the source's read head but did not move the track's zero, so adding that head
+	-- here would make every seek after the first one jump by where it started.
+	local frame = math.floor(seconds * source.sampleRate)
+	frame = math.max(0, math.min(frame, source.frameCount))
 
 	if not source:seek(frame) then
 		return false
@@ -567,7 +601,7 @@ function Player:seek(seconds)
 		carried.startFrame = source.frameCount - frame
 		carried.sourceStart = 0
 		carried.isDone = false
-		self:requeue({ item = carried.source, isOwned = carried.isOwned })
+		self:requeue({ item = carried.source, isOwned = carried.isOwned})
 		self.decoding = nil
 	end
 
@@ -621,6 +655,32 @@ function Player:isFinished()
 	local delay = self.stream ~= nil and self.stream:delay() or 0
 
 	return delay == 0
+end
+
+--- Configures the graphic equalizer. An empty list, or every band at zero, is the
+--- path the player takes when there is nothing to filter. The bands are copied so a
+--- caller can change its own table without changing what is already playing.
+---@param bands treble.Equalizer.Band[]?
+---@return treble.Player
+function Player:setEqualizer(bands)
+	if bands == nil or #bands == 0 then
+		self.equalizer = nil
+		return self
+	end
+
+	local copy = {}
+	for at = 1, #bands do
+			local band = bands[at]
+			copy[#copy + 1] = {
+			frequency = band.frequency,
+			gain = band.gain,
+			q = band.q,
+			}
+		end
+
+	local equalizer = Equalizer.new(copy)
+	self.equalizer = equalizer:isFlat() and nil or equalizer
+	return self
 end
 
 ---@param volume number

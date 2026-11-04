@@ -8,7 +8,6 @@ local fixture = require("tests.fixtures.wav")
 local Player = require("treble.player")
 local Wav = require("treble.formats.wav")
 
-local Samples = ffi.typeof("int16_t[?]")
 local Int16 = ffi.typeof("int16_t[1]")
 -- A machine with no ALSA at all, such as Android, or one without a null device,
 -- cannot run the tests that drive a real stream.

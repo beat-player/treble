@@ -4,8 +4,6 @@
 -- when they are asked for, so both a file on a slow network mount and a buffer
 -- already in memory work without loading a whole track.
 local ffi = require("ffi")
-local buffer = require("string.buffer")
-local Tags = require("treble.tags")
 
 local RIFF_HEADER_SIZE = 12
 local CHUNK_HEADER_SIZE = 8
@@ -81,10 +79,12 @@ end
 
 --- Walks the chunk headers of a RIFF file to find the format and the sample data.
 ---@param pointer ffi.cdata*
----@param size number
+---@param size number # how much of the file is in the buffer
+---@param total number? # how large the whole file is, when the header is only a prefix
 ---@return treble.formats.wav.Info? info
 ---@return string? err
-local function parse(pointer, size)
+local function parse(pointer, size, total)
+	total = total or size
 	if size < RIFF_HEADER_SIZE + CHUNK_HEADER_SIZE then
 		return nil, "Truncated WAV file"
 	end
@@ -127,8 +127,8 @@ local function parse(pointer, size)
 		elseif id == "data" then
 			info.dataOffset = body
 			-- A size that claims more than the file holds would read past the end of
-			-- the buffer, so it is clamped to what is really there.
-			info.dataLen = math.min(chunkSize, size - body)
+			-- it, so it is clamped to what is really there.
+			info.dataLen = math.min(chunkSize, total - body)
 			break
 		end
 
@@ -206,7 +206,7 @@ WavSource.__index = WavSource
 --- Points at the raw sample bytes for the next frames, from memory or the file.
 ---@param source treble.formats.WavSource
 ---@param frames number
----@return ffi.cdata*? raw
+---@return string|ffi.cdata*? raw
 ---@return number bytes
 ---@return string? err
 local function fetchRaw(source, frames)
@@ -224,7 +224,9 @@ local function fetchRaw(source, frames)
 		return nil, 0, err or "Failed to read audio data"
 	end
 
-	return ffi.cast("const char*", raw), #raw
+	-- Keep the string itself: a pointer cast from it does not keep it alive, and
+	-- the caller copies from it after this function returns.
+	return raw, #raw
 end
 
 ---@param out ffi.cdata*
@@ -326,13 +328,20 @@ function Wav.fromPath(path)
 		return nil, "Failed to open audio file: " .. tostring(openErr)
 	end
 
+	local fileSize = file:seek("end")
+	if fileSize == nil then
+		file:close()
+		return nil, "Failed to measure audio file"
+	end
+
+	file:seek("set", 0)
 	local head = file:read(HEAD_SIZE)
 	if head == nil then
 		file:close()
 		return nil, "Failed to read audio file header"
 	end
 
-	local info, err = parse(ffi.cast("const char*", head), #head)
+	local info, err = parse(ffi.cast("const char*", head), #head, fileSize)
 
 	-- A file with large chunks before its samples needs a longer look at the
 	-- header. The search is capped, because reading a whole file to find the start
@@ -344,7 +353,7 @@ function Wav.fromPath(path)
 		end
 
 		head = head .. more
-		info, err = parse(ffi.cast("const char*", head), #head)
+		info, err = parse(ffi.cast("const char*", head), #head, fileSize)
 	end
 
 	if info == nil then

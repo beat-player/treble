@@ -1,12 +1,15 @@
 local audio = require("treble.audio")
+local Equalizer = require("treble.equalizer")
 local Player = require("treble.player")
 
 ---@class treble
 ---@field Audio treble.audio
+---@field Equalizer treble.Equalizer
 ---@field Player treble.Player
 local treble = {}
 
 treble.Audio = audio
+treble.Equalizer = Equalizer
 treble.Player = Player
 
 --- One shot players from treble.play, kept only until their sound has finished.
@@ -15,12 +18,12 @@ local oneShots = {}
 
 local function reap()
 	for i = #oneShots, 1, -1 do
-		local player = oneShots[i]
-		if player:isFinished() then
-			player:close()
-			table.remove(oneShots, i)
+			local player = oneShots[i]
+			if player:isFinished() then
+				player:close()
+				table.remove(oneShots, i)
+			end
 		end
-	end
 end
 
 --- Plays a file or a source.

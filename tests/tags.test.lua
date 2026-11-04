@@ -81,6 +81,15 @@ test.it("probes an mp3 that states its length with a tag", function()
 	test.equal(probe.duration, 0.25)
 end)
 
+test.it("probes a wav's length from the data chunk, not the header buffer", function()
+	local probe = assert(audio.probe("tests/fixtures/tagged.wav"))
+
+	test.equal(probe.format, "WAV")
+	test.equal(probe.sampleRate, 44100)
+	test.equal(probe.channels, 1)
+	test.equal(probe.duration, 0.25, "a 22050 byte mono 16 bit stream is a quarter second")
+end)
+
 test.it("reports a file with no tags", function()
 	local tags, err = audio.tags("tests/fixtures/tone.wav")
 
