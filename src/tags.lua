@@ -53,20 +53,44 @@ local function utf8Char(value)
 	)
 end
 
+--- Turns the ISO-8859-1 bytes an ID3 tag stores into UTF-8.
+---@param raw string
+---@return string
+local function latin1(raw)
+	return (raw:gsub("[\128-\255]", function(byte)
+		local value = string.byte(byte)
+
+		return utf8Char(value)
+	end))
+end
+
+--- Undoes ID3 unsynchronisation: every stored FF 00 stands for one FF.
+---@param raw string
+---@return string
+local function deunsync(raw)
+	return (raw:gsub("\255%z", "\255"))
+end
+
 --- Turns one of the four ID3 text encodings into UTF-8.
 ---@param raw string
 ---@param encoding number
 ---@return string
 local function decodeText(raw, encoding)
 	if encoding == UTF16 or encoding == UTF16_BE then
-		local isBigEndian = encoding == UTF16_BE
+		local isBigEndian = true
 		local start = 1
 
 		if encoding == UTF16 and #raw >= 2 then
-			-- A byte order mark decides which way round the pairs are.
-			local mark = string.byte(raw, 1, 2)
-			isBigEndian = mark == nil or string.char(mark) == "\254\255"
-			start = 3
+			-- A byte order mark decides which way round the pairs are; the
+			-- specification says text without one is big endian.
+			local first, second = string.byte(raw, 1, 2)
+
+			if first == 0xFE and second == 0xFF then
+				start = 3
+			elseif first == 0xFF and second == 0xFE then
+				isBigEndian = false
+				start = 3
+			end
 		end
 
 		local parts = {}
@@ -92,7 +116,11 @@ local function decodeText(raw, encoding)
 		return table.concat(parts)
 	end
 
-	-- Latin-1 and UTF-8 both pass through, the first with its high bytes kept.
+	if encoding == LATIN1 then
+		return latin1(raw)
+	end
+
+	-- Encoding 3 is UTF-8 already, which is what callers expect.
 	return raw
 end
 
@@ -175,16 +203,6 @@ local function applyFrame(tags, frame, raw)
 end
 
 ---@param raw string
----@return string
-local function latin1(raw)
-	return (raw:gsub("[\128-\255]", function(byte)
-		local value = string.byte(byte)
-
-		return utf8Char(value)
-	end))
-end
-
----@param raw string
 ---@return string? mime
 ---@return string? description
 ---@return string? data
@@ -196,7 +214,7 @@ local function parseAttachedPicture(raw)
 	local afterType = string.sub(afterMime, 2)
 	local description, data = takeText(afterType, encoding)
 
-	return latin1(mime), description, data
+	return mime, description, data
 end
 
 --- Reads an ID3v2 tag: the header, its frames, and an attached picture.
@@ -211,6 +229,16 @@ function Tags.fromId3v2(raw)
 	local _, b2, b3, b4 = string.byte(raw, 7, 10)
 	local size = ((string.byte(raw, 7) or 0) * 2097152) + ((b2 or 0) * 16384) + ((b3 or 0) * 128) + (b4 or 0)
 
+	local limit = math.min(#raw, 10 + size)
+
+	if major == 3 and bit.band(flags, 0x80) ~= 0 then
+		-- In 2.3 unsynchronisation covers the whole tag body, so undo it once
+		-- before walking the frames: their sizes count the unescaped bytes.
+		local body = deunsync(string.sub(raw, 11, limit))
+		raw = string.sub(raw, 1, 10) .. body .. string.sub(raw, limit + 1)
+		limit = 10 + #body
+	end
+
 	local index = 11
 
 	if bit.band(flags, 0x40) ~= 0 then
@@ -221,8 +249,6 @@ function Tags.fromId3v2(raw)
 			+ (string.byte(raw, index + 3) or 0)
 		index = index + 4 + extSize
 	end
-
-	local limit = math.min(#raw, 10 + size)
 
 	while index + 6 <= limit do
 		local id
@@ -256,14 +282,58 @@ function Tags.fromId3v2(raw)
 		end
 
 		local body = string.sub(raw, index + header, index + header + frameSize - 1)
+		local readable = true
+		local offset = 1
+		local unsync = false
 
-		if id == "APIC" or id == "PIC" then
-			local mime, description, data = parseAttachedPicture(body)
-			if data ~= nil then
-				tags.picture = { mime = mime or "image/", data = data, description = description }
+		if major == 4 then
+			local format = string.byte(raw, index + 9) or 0
+
+			if bit.band(format, 0x0C) ~= 0 then
+				-- Compressed and encrypted frames need a decompressor or a key
+				-- before their bytes mean anything.
+				readable = false
+			else
+				if bit.band(format, 0x40) ~= 0 then
+					-- A group identity byte sits before the content.
+					offset = offset + 1
+				end
+
+				if bit.band(format, 0x01) ~= 0 then
+					-- The length of the unmodified content comes first.
+					offset = offset + 4
+				end
+
+				-- 2.4 can unsynchronise each frame, or the whole tag at once.
+				unsync = bit.band(format, 0x02) ~= 0 or bit.band(flags, 0x80) ~= 0
 			end
-		else
-			applyFrame(tags, id, body)
+		elseif major == 3 then
+			local format = string.byte(raw, index + 9) or 0
+
+			if bit.band(format, 0xC0) ~= 0 then
+				-- Compression and encryption, as in 2.4.
+				readable = false
+			elseif bit.band(format, 0x20) ~= 0 then
+				-- A group identity byte sits before the content.
+				offset = offset + 1
+			end
+		end
+
+		if readable then
+			body = string.sub(body, offset)
+
+			if unsync then
+				body = deunsync(body)
+			end
+
+			if id == "APIC" or id == "PIC" then
+				local mime, description, data = parseAttachedPicture(body)
+				if data ~= nil then
+					tags.picture = { mime = mime or "image/", data = data, description = description }
+				end
+			else
+				applyFrame(tags, id, body)
+			end
 		end
 
 		index = index + header + frameSize
