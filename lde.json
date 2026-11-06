@@ -2,6 +2,6 @@
 	"name": "treble",
 	"description": "A cross platform audio library for LuaJIT",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"dependencies": {}
 }
