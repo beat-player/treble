@@ -4,6 +4,7 @@
 -- belongs to an image library, so a picture comes back as its MIME type and its
 -- bytes.
 local bit = require("bit")
+local utf8 = require("utf8")
 
 ---@class treble.Tags
 ---@field title string?
@@ -30,40 +31,6 @@ local LATIN1 = 0
 local UTF16 = 1
 local UTF16_BE = 2
 
----@param value number
----@return string
-local function utf8Char(value)
-	if value < 0x80 then
-		return string.char(value)
-	elseif value < 0x800 then
-		return string.char(0xC0 | bit.rshift(value, 6), 0x80 | bit.band(value, 0x3F))
-	elseif value < 0x10000 then
-		return string.char(
-			0xE0 | bit.rshift(value, 12),
-			0x80 | bit.band(bit.rshift(value, 6), 0x3F),
-			0x80 | bit.band(value, 0x3F)
-		)
-	end
-
-	return string.char(
-		0xF0 | bit.rshift(value, 18),
-		0x80 | bit.band(bit.rshift(value, 12), 0x3F),
-		0x80 | bit.band(bit.rshift(value, 6), 0x3F),
-		0x80 | bit.band(value, 0x3F)
-	)
-end
-
---- Turns the ISO-8859-1 bytes an ID3 tag stores into UTF-8.
----@param raw string
----@return string
-local function latin1(raw)
-	return (raw:gsub("[\128-\255]", function(byte)
-		local value = string.byte(byte)
-
-		return utf8Char(value)
-	end))
-end
-
 --- Undoes ID3 unsynchronisation: every stored FF 00 stands for one FF.
 ---@param raw string
 ---@return string
@@ -76,48 +43,18 @@ end
 ---@param encoding number
 ---@return string
 local function decodeText(raw, encoding)
-	if encoding == UTF16 or encoding == UTF16_BE then
-		local isBigEndian = true
-		local start = 1
+	if encoding == UTF16 then
+		-- A byte order mark decides which way round the pairs are; the
+		-- specification says text without one is big endian.
+		return utf8.fromUTF16(raw)
+	end
 
-		if encoding == UTF16 and #raw >= 2 then
-			-- A byte order mark decides which way round the pairs are; the
-			-- specification says text without one is big endian.
-			local first, second = string.byte(raw, 1, 2)
-
-			if first == 0xFE and second == 0xFF then
-				start = 3
-			elseif first == 0xFF and second == 0xFE then
-				isBigEndian = false
-				start = 3
-			end
-		end
-
-		local parts = {}
-		local index = start
-		while index + 1 <= #raw do
-			local first, second = string.byte(raw, index, index + 1)
-			local value = isBigEndian and (first * 256 + second) or (second * 256 + first)
-
-			if value >= 0xD800 and value <= 0xDBFF and index + 3 <= #raw then
-				-- A surrogate pair carries one character between two units.
-				local third, fourth = string.byte(raw, index + 2, index + 3)
-				local low = isBigEndian and (third * 256 + fourth) or (fourth * 256 + third)
-
-				value = 0x10000 + (value - 0xD800) * 0x400 + (low - 0xDC00)
-				index = index + 4
-			else
-				index = index + 2
-			end
-
-			parts[#parts + 1] = utf8Char(value)
-		end
-
-		return table.concat(parts)
+	if encoding == UTF16_BE then
+		return utf8.fromUTF16(raw, true)
 	end
 
 	if encoding == LATIN1 then
-		return latin1(raw)
+		return utf8.fromLatin1(raw)
 	end
 
 	-- Encoding 3 is UTF-8 already, which is what callers expect.
@@ -354,9 +291,9 @@ function Tags.fromId3v1(raw)
 
 	---@type treble.Tags
 	local tags = {
-		title = trim(latin1(string.sub(raw, 4, 33))),
-		artist = trim(latin1(string.sub(raw, 34, 63))),
-		album = trim(latin1(string.sub(raw, 64, 93))),
+		title = trim(utf8.fromLatin1(string.sub(raw, 4, 33))),
+		artist = trim(utf8.fromLatin1(string.sub(raw, 34, 63))),
+		album = trim(utf8.fromLatin1(string.sub(raw, 64, 93))),
 		date = trim(string.sub(raw, 94, 97)),
 	}
 
@@ -369,7 +306,7 @@ function Tags.fromId3v1(raw)
 		comment = string.sub(comment, 1, 28)
 	end
 
-	tags.comment = trim(latin1(comment))
+	tags.comment = trim(utf8.fromLatin1(comment))
 
 	return tags
 end
