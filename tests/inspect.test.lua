@@ -64,6 +64,31 @@ for _, name in ipairs({ "tone.mp3", "tone.flac", "tone.opus", "tone.wav" }) do
 	end)
 end
 
+test.it("counts the frames of an MP3 that does not say how many it has", function()
+	-- Ten MPEG-1 Layer III frames at 128 kbps and ten at 320, with no Xing, Info or VBRI frame to
+	-- say so: a length worked out from the first frame's bitrate would be far off. Only the headers
+	-- are read, so the audio can be silence; the ID3v1 tag after the last frame ends the stream.
+	local function frame(bitrateBits, length)
+		return string.char(0xFF, 0xFB, bitrateBits, 0xC0) .. string.rep("\0", length - 4)
+	end
+	local parts = {}
+	for _ = 1, 10 do parts[#parts + 1] = frame(0x90, 417) end
+	for _ = 1, 10 do parts[#parts + 1] = frame(0xE0, 1044) end
+	parts[#parts + 1] = "TAG" .. string.rep("\0", 125)
+
+	local path = os.tmpname()
+	local file = assert(io.open(path, "wb"))
+	file:write(table.concat(parts))
+	file:close()
+	local info = audio.inspect(path)
+	os.remove(path)
+
+	assert(info)
+	test.equal(info.format, "MP3")
+	test.equal(info.channels, 1)
+	test.truthy(math.abs(info.duration - 20 * 1152 / 44100) < 1e-9, "every frame is counted, and only frames")
+end)
+
 test.it("reports a file it cannot read, naming it", function()
 	local info, err = audio.inspect("tests/fixtures/not-a-file.wav")
 
