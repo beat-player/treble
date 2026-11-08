@@ -113,6 +113,23 @@ function Player:playedFrames()
 	return self.framesWritten - delay
 end
 
+--- Where a seek lands in a source, and the frames left after it. A source that cannot say how long
+--- it is has no end to stop the seek at, and nothing left to count: its length stays unknown until
+--- its data runs out.
+---@param source treble.Source
+---@param seconds number
+---@return number frame
+---@return number frames
+local function seekTarget(source, seconds)
+	local frame = math.max(0, math.floor(seconds * source.sampleRate))
+	if source.frameCount == 0 then
+		return frame, 0
+	end
+
+	frame = math.min(frame, source.frameCount)
+	return frame, source.frameCount - frame
+end
+
 --- Takes the next queued track and places it after everything already on its way to
 --- the device, which is the timeline position of the frames still staged.
 ---@return treble.Player.Track? track
@@ -148,11 +165,10 @@ function Player:adopt()
 	local pendingSeek = self.pendingSeek
 	self.pendingSeek = nil
 	if pendingSeek ~= nil then
-		local frame = math.floor(pendingSeek * source.sampleRate)
-		frame = math.max(0, math.min(frame, source.frameCount))
+		local frame, frames = seekTarget(source, pendingSeek)
 		if source:seek(frame) then
 			track.sourceStart = frame
-			track.frames = source.frameCount - frame
+			track.frames = frames
 		end
 	end
 
@@ -587,8 +603,7 @@ function Player:seek(seconds)
 	-- Seconds are into the track, and the source is a decode of that whole track: an earlier
 	-- seek moved the source's read head but did not move the track's zero, so adding that head
 	-- here would make every seek after the first one jump by where it started.
-	local frame = math.floor(seconds * source.sampleRate)
-	frame = math.max(0, math.min(frame, source.frameCount))
+	local frame, frames = seekTarget(source, seconds)
 
 	if not source:seek(frame) then
 		return false
@@ -613,8 +628,10 @@ function Player:seek(seconds)
 	end
 
 	track.sourceStart = frame
-	track.frames = source.frameCount - frame
+	track.frames = frames
 	track.startFrame = 0
+	-- The source reads on from the seek, so whatever it had run out of, it has data again.
+	track.isDone = false
 
 	self.framesWritten = 0
 	self.stagedOffset = 0

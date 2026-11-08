@@ -43,6 +43,21 @@ local function ramp(opts)
 	}))
 end
 
+--- An MP3 with no Xing or Info header: its frames are all there, but the decoder will not walk the
+--- file to count them, so it says nought until it runs out of them.
+---@param source treble.Source
+---@return treble.Source
+local function unmeasured(source)
+	return {
+		channels = source.channels,
+		sampleRate = source.sampleRate,
+		frameCount = 0,
+		read = function(_, out, frames) return source:read(out, frames) end,
+		seek = function(_, frame) return source:seek(frame) end,
+		close = function() source:close() end,
+	}
+end
+
 ---@alias tests.StreamFactory fun(sampleRate: number, channels: number): treble.OutputStream
 
 ---@param opts tests.FakeStream.Opts?
@@ -168,18 +183,6 @@ test.it("plays a track that cannot say how long it is to the end of its data", f
 		ended = ended + 1
 	end
 
-	-- An MP3 with no Xing or Info header: its frames are all there, but the decoder will not walk
-	-- the file to count them, so it says nought until it runs out of them.
-	local function unmeasured(source)
-		return {
-			channels = source.channels,
-			sampleRate = source.sampleRate,
-			frameCount = 0,
-			read = function(_, out, frames) return source:read(out, frames) end,
-			seek = function(_, frame) return source:seek(frame) end,
-			close = function() source:close() end,
-		}
-	end
 	local first, second = unmeasured(ramp({ frames = 3000})), unmeasured(ramp({ frames = 1000}))
 	player:enqueue(first)
 	player:enqueue(second)
@@ -198,6 +201,45 @@ test.it("plays a track that cannot say how long it is to the end of its data", f
 	run(player, created, 200)
 	test.equal(created[1].writtenFrames, 4000, "both tracks played to the end of their data")
 	test.equal(ended, 2, "and each reported its end once")
+end)
+
+test.it("seeks in a track that cannot say how long it is, even once its data ran out", function()
+	local create, created = factory({ capacity = 1000, total = 10000})
+	local player = Player.new({ stream = create, stagingSeconds = 0.05})
+
+	local ended = 0
+	player.onTrackEnd = function()
+		ended = ended + 1
+	end
+
+	player:enqueue(unmeasured(ramp({ frames = 3000})))
+	player:play()
+	for _ = 1, 4 do
+			player:update()
+		end
+	local stream = created[1]
+
+	test.truthy(player:seek(0.25), "a point past what was decoded is not past the end")
+	local from = stream.writtenFrames
+	for _ = 1, 8 do
+			player:update()
+		end
+	test.equal(stream.written[from], 2000, "the device is handed the frames from there")
+	test.equal(stream.writtenFrames - from, 1000, "to the end of the data, which has now run out")
+
+	test.truthy(player:seek(0.125))
+	from = stream.writtenFrames
+	for _ = 1, 4 do
+			player:update()
+		end
+	test.equal(ended, 0, "a seek back means the track has not ended")
+	test.equal(stream.written[from], 1000, "and it plays on from the new point")
+	stream:play(100)
+	player:update()
+	test.equal(player:position(), 1100 / 8000)
+
+	run(player, created, 200)
+	test.equal(ended, 1, "it ends once, at the end of its data")
 end)
 
 test.it("hands the next track to the device while the first is unplayed", function()
