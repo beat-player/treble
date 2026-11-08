@@ -113,6 +113,23 @@ function Player:playedFrames()
 	return self.framesWritten - delay
 end
 
+--- Where a seek lands in a source, and the frames left after it. A source that cannot say how long
+--- it is has no end to stop the seek at, and nothing left to count: its length stays unknown until
+--- its data runs out.
+---@param source treble.Source
+---@param seconds number
+---@return number frame
+---@return number frames
+local function seekTarget(source, seconds)
+	local frame = math.max(0, math.floor(seconds * source.sampleRate))
+	if source.frameCount == 0 then
+		return frame, 0
+	end
+
+	frame = math.min(frame, source.frameCount)
+	return frame, source.frameCount - frame
+end
+
 --- Takes the next queued track and places it after everything already on its way to
 --- the device, which is the timeline position of the frames still staged.
 ---@return treble.Player.Track? track
@@ -148,11 +165,10 @@ function Player:adopt()
 	local pendingSeek = self.pendingSeek
 	self.pendingSeek = nil
 	if pendingSeek ~= nil then
-		local frame = math.floor(pendingSeek * source.sampleRate)
-		frame = math.max(0, math.min(frame, source.frameCount))
+		local frame, frames = seekTarget(source, pendingSeek)
 		if source:seek(frame) then
 			track.sourceStart = frame
-			track.frames = source.frameCount - frame
+			track.frames = frames
 		end
 	end
 
@@ -171,12 +187,19 @@ function Player:adopt()
 	return track
 end
 
+--- Whether a track's end is known: a source that cannot say how long it is reports nought frames,
+--- and says it by ending -- until its data runs out, nought is no length at all.
+---@param track treble.Player.Track
+local function lengthKnown(track)
+	return track.isDone or track.frames > 0
+end
+
 --- Fires onTrackEnd for each track the device has played past and lets it go.
 function Player:releaseHeard()
 	local played = self:playedFrames()
 	local track = self.playing
 
-	while track ~= nil and played >= track.startFrame + track.frames do
+	while track ~= nil and lengthKnown(track) and played >= track.startFrame + track.frames do
 		if track.isOwned then
 			track.source:close()
 		end
@@ -580,8 +603,7 @@ function Player:seek(seconds)
 	-- Seconds are into the track, and the source is a decode of that whole track: an earlier
 	-- seek moved the source's read head but did not move the track's zero, so adding that head
 	-- here would make every seek after the first one jump by where it started.
-	local frame = math.floor(seconds * source.sampleRate)
-	frame = math.max(0, math.min(frame, source.frameCount))
+	local frame, frames = seekTarget(source, seconds)
 
 	if not source:seek(frame) then
 		return false
@@ -606,8 +628,10 @@ function Player:seek(seconds)
 	end
 
 	track.sourceStart = frame
-	track.frames = source.frameCount - frame
+	track.frames = frames
 	track.startFrame = 0
+	-- The source reads on from the seek, so whatever it had run out of, it has data again.
+	track.isDone = false
 
 	self.framesWritten = 0
 	self.stagedOffset = 0
@@ -625,7 +649,7 @@ function Player:position()
 	end
 
 	local played = self:playedFrames() - track.startFrame
-	local frames = math.max(0, math.min(played, track.frames))
+	local frames = math.max(0, lengthKnown(track) and math.min(played, track.frames) or played)
 
 	return (track.sourceStart + frames) / track.source.sampleRate
 end
