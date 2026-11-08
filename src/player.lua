@@ -171,12 +171,19 @@ function Player:adopt()
 	return track
 end
 
+--- Whether a track's end is known: a source that cannot say how long it is reports nought frames,
+--- and says it by ending -- until its data runs out, nought is no length at all.
+---@param track treble.Player.Track
+local function lengthKnown(track)
+	return track.isDone or track.frames > 0
+end
+
 --- Fires onTrackEnd for each track the device has played past and lets it go.
 function Player:releaseHeard()
 	local played = self:playedFrames()
 	local track = self.playing
 
-	while track ~= nil and played >= track.startFrame + track.frames do
+	while track ~= nil and lengthKnown(track) and played >= track.startFrame + track.frames do
 		if track.isOwned then
 			track.source:close()
 		end
@@ -625,7 +632,7 @@ function Player:position()
 	end
 
 	local played = self:playedFrames() - track.startFrame
-	local frames = math.max(0, math.min(played, track.frames))
+	local frames = math.max(0, lengthKnown(track) and math.min(played, track.frames) or played)
 
 	return (track.sourceStart + frames) / track.source.sampleRate
 end

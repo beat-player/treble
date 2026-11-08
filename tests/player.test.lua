@@ -157,6 +157,49 @@ test.it("plays the queue in order and reports each track", function()
 	test.equal(created[1].writtenFrames, 800)
 end)
 
+test.it("plays a track that cannot say how long it is to the end of its data", function()
+	-- Less staged, and less held by the device, than the first track is long: its data has not run
+	-- out while it plays, which is a real track's case.
+	local create, created = factory({ capacity = 1000, total = 10000})
+	local player = Player.new({ stream = create, stagingSeconds = 0.05})
+
+	local ended = 0
+	player.onTrackEnd = function()
+		ended = ended + 1
+	end
+
+	-- An MP3 with no Xing or Info header: its frames are all there, but the decoder will not walk
+	-- the file to count them, so it says nought until it runs out of them.
+	local function unmeasured(source)
+		return {
+			channels = source.channels,
+			sampleRate = source.sampleRate,
+			frameCount = 0,
+			read = function(_, out, frames) return source:read(out, frames) end,
+			seek = function(_, frame) return source:seek(frame) end,
+			close = function() source:close() end,
+		}
+	end
+	local first, second = unmeasured(ramp({ frames = 3000})), unmeasured(ramp({ frames = 1000}))
+	player:enqueue(first)
+	player:enqueue(second)
+	player:play()
+
+	for _ = 1, 4 do
+			player:update()
+		end
+	test.equal(ended, 0, "a track is not over before any of it was heard")
+
+	created[1]:play(600)
+	player:update()
+	test.equal(ended, 0, "nor part way through")
+	test.equal(player:position(), 600 / 8000, "and its position runs from the frames heard")
+
+	run(player, created, 200)
+	test.equal(created[1].writtenFrames, 4000, "both tracks played to the end of their data")
+	test.equal(ended, 2, "and each reported its end once")
+end)
+
 test.it("hands the next track to the device while the first is unplayed", function()
 	local create, created = factory({ capacity = 8000, total = 40000})
 	local player = Player.new({ stream = create})
