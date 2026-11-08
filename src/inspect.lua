@@ -16,7 +16,6 @@ local Tags = require("treble.tags")
 ---@field sampleRate number
 ---@field channels number
 ---@field duration number # seconds, 0 when the container cannot say
----@field durationEstimated boolean? # true when a bitrate was used to work it out
 ---@field tags treble.Tags? # pictures are not copied; see `hasPicture`
 ---@field hasPicture boolean
 
@@ -304,10 +303,19 @@ end
 -- MP3
 -- ────────────────────────────────────────────────────────────────
 
+-- Kilobits per second by bitrate index, for each MPEG version and layer. MPEG-2 and 2.5 share one
+-- set, and in it Layers II and III share one table.
 local BITRATES = {
-	[1] = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 },
-	[2] = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384 },
-	[3] = { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448 },
+	[1] = {
+		[1] = { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448 },
+		[2] = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384 },
+		[3] = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 },
+	},
+	[2] = {
+		[1] = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256 },
+		[2] = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 },
+		[3] = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 },
+	},
 }
 
 local SAMPLE_RATES = {
@@ -337,7 +345,7 @@ local function mpegFrame(head, at)
 
 	local bitrateIndex = bit.band(bit.rshift(b3, 4), 0xF)
 	local rateIndex = bit.band(bit.rshift(b3, 2), 0x3)
-	local bitrate = BITRATES[layer] and BITRATES[layer][bitrateIndex + 1]
+	local bitrate = BITRATES[version == 1 and 1 or 2][layer][bitrateIndex + 1]
 	local sampleRate = SAMPLE_RATES[version] and SAMPLE_RATES[version][rateIndex + 1]
 	if bitrate == nil or bitrate == 0 or sampleRate == nil then return nil end
 
@@ -353,7 +361,40 @@ local function mpegFrame(head, at)
 		frameLength = math.floor((version == 1 and 144 or 72) * bitrate * 1000 / sampleRate + padding)
 	end
 
-	return sampleRate, channels, bitrate, frameLength, version == 1 and 1152 or 576
+	-- Layer I frames hold 384 samples, and a Layer III frame of MPEG-2 or 2.5 holds half of 1152.
+	local samplesPerFrame = layer == 1 and 384 or ((layer == 3 and version ~= 1) and 576 or 1152)
+	return sampleRate, channels, bitrate, frameLength, samplesPerFrame
+end
+
+-- How much of a stream is read at a time while its frames are counted.
+local COUNT_BLOCK = 1048576
+
+--- The frames from the first one to the end of the stream, counted by their headers alone: each
+--- says how long it is, so the next one is found without decoding anything. The stream ends at
+--- the first thing that is not a frame, which is a tag at the end of the file.
+---@param file file*
+---@param first number byte offset of the first frame
+---@param total number
+---@return number frames
+local function countFrames(file, first, total)
+	local frames = 0
+	local at = first
+	local block, blockAt = "", first
+
+	while at + 4 <= total do
+		if at + 4 > blockAt + #block then
+			blockAt = at
+			block = readAt(file, at, math.min(COUNT_BLOCK, total - at)) or ""
+		end
+
+		local _, _, _, frameLength = mpegFrame(block, at - blockAt)
+		if frameLength == nil or frameLength <= 0 then break end
+
+		frames = frames + 1
+		at = at + frameLength
+	end
+
+	return frames
 end
 
 ---@param file file*
@@ -362,7 +403,6 @@ end
 ---@return number? duration
 ---@return number? sampleRate
 ---@return number? channels
----@return boolean estimated
 local function mp3Duration(file, start, total)
 	local head = readAt(file, start, math.min(8192, total - start)) or ""
 	local at = 0
@@ -405,7 +445,7 @@ local function mp3Duration(file, start, total)
 				frame:byte(xingAt + 10), frame:byte(xingAt + 11))
 			if frames > 0 then
 				return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate,
-					found.channels, false
+					found.channels
 			end
 		end
 	end
@@ -414,16 +454,14 @@ local function mp3Duration(file, start, total)
 		local frames = be32(frame:byte(51), frame:byte(52), frame:byte(53), frame:byte(54))
 		if frames > 0 then
 			return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate,
-				found.channels, false
+				found.channels
 		end
 	end
 
-	local bytes = total - start
-	if bytes > 0 and found.bitrate ~= nil and found.bitrate > 0 then
-		return bytes * 8 / (found.bitrate * 1000), found.sampleRate, found.channels, true
-	end
-
-	return nil
+	-- With neither, the frames are counted: a stream of one bitrate could be worked out from its
+	-- size, but one whose bitrate varies cannot, and nothing before the end says which it is.
+	local frames = countFrames(file, start + found.offset, total)
+	return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate, found.channels
 end
 
 ---@param file file*
@@ -491,23 +529,19 @@ local function mp3(file)
 	end
 
 	local total = sizeOf(file)
-	local duration, sampleRate, channels, estimated = mp3Duration(file, at, total)
 
 	if at == 0 then
 		-- The first frame may not be at byte zero even without a tag; find it.
 		local head = readAt(file, 0, math.min(65536, total)) or ""
-		local foundAt = nil
 		for index = 0, #head - 4 do
 			if mpegFrame(head, index) ~= nil then
-				foundAt = index
+				at = index
 				break
 			end
 		end
-		if foundAt ~= nil then
-			at = foundAt
-			duration, sampleRate, channels, estimated = mp3Duration(file, at, total)
-		end
 	end
+
+	local duration, sampleRate, channels = mp3Duration(file, at, total)
 
 	if id3Tags == nil then
 		-- ID3v1 lives in the last 128 bytes.
@@ -527,7 +561,6 @@ local function mp3(file)
 		sampleRate = sampleRate,
 		channels = channels or 2,
 		duration = duration or 0,
-		durationEstimated = estimated,
 		tags = id3Tags or nil,
 		hasPicture = hasPicture,
 	}
