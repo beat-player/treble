@@ -18,6 +18,7 @@ local Tags = require("treble.tags")
 ---@field duration number # seconds, 0 when the container cannot say
 ---@field tags treble.Tags? # pictures are not copied; see `hasPicture`
 ---@field hasPicture boolean
+---@field fingerprint string? # 16 hex digits over the audio, stable across tag edits
 
 local inspect = {}
 
@@ -74,6 +75,109 @@ local function synchsafeBytes(value)
 		bit.band(bit.rshift(value, 7), 0x7F),
 		bit.band(value, 0x7F)
 	)
+end
+
+-- ────────────────────────────────────────────────────────────────
+-- fingerprint
+-- ────────────────────────────────────────────────────────────────
+
+-- A track is known by its audio, not by where the file sits. Tags move the first audio byte
+-- and a picture can renumber an Ogg stream, so a fingerprint reads the payload only and stays
+-- the same through both. Sixteen bytes at the start, at a megabyte and at four say enough to
+-- tell two encodes apart without hashing a whole track.
+local SAMPLE_OFFSETS = { 0, 1048576, 4194304 }
+local SAMPLE_BYTES = 16384
+
+-- FNV-1a is 64 bits wide, which LuaJIT's `bit` library does not carry. Storing it as two
+-- 32-bit halves keeps the byte loop on plain numbers; multiplying by the prime is then a
+-- shift (the 2^40 term) and one small product rather than a boxed cdata per byte.
+local FNV_LO = 0x84222325
+local FNV_HI = 0xCBF29CE4
+local FNV_PRIME = 0x1B3
+local TWO32 = 4294967296
+
+---@param lo number
+---@param hi number
+---@param byte number
+---@return number lo
+---@return number hi
+local function fnvByte(lo, hi, byte)
+	lo = bit.bxor(lo, byte) % TWO32
+	local product = lo * FNV_PRIME
+
+	return product % TWO32,
+		(hi * FNV_PRIME + math.floor(product / TWO32) + (lo * 256) % TWO32) % TWO32
+end
+
+---@param lo number
+---@param hi number
+---@param value number
+---@return number lo
+---@return number hi
+local function fnvU32(lo, hi, value)
+	for _ = 1, 4 do
+		lo, hi = fnvByte(lo, hi, value % 256)
+		value = math.floor(value / 256)
+	end
+
+	return lo, hi
+end
+
+--- Whole milliseconds, so a container's floating point duration does not move the hash.
+---@param lo number
+---@param hi number
+---@param seconds number
+---@return number lo
+---@return number hi
+local function fnvSeconds(lo, hi, seconds)
+	local ms = math.floor(seconds * 1000 + 0.5)
+	for _ = 1, 8 do
+		lo, hi = fnvByte(lo, hi, ms % 256)
+		ms = math.floor(ms / 256)
+	end
+
+	return lo, hi
+end
+
+---@param format string
+---@param seconds number
+---@param samples string[]
+---@return string
+local function fingerprintOf(format, seconds, samples)
+	local lo, hi = FNV_LO, FNV_HI
+
+	for index = 1, #format do
+		lo, hi = fnvByte(lo, hi, format:byte(index))
+	end
+	lo, hi = fnvSeconds(lo, hi, seconds)
+
+	for _, sample in ipairs(samples) do
+		lo, hi = fnvU32(lo, hi, #sample)
+		for index = 1, #sample do
+			lo, hi = fnvByte(lo, hi, sample:byte(index))
+		end
+	end
+
+	return string.format("%04x%04x%04x%04x", math.floor(hi / 65536), hi % 65536,
+		math.floor(lo / 65536), lo % 65536)
+end
+
+--- The same sample positions for a payload that sits in one run of the file.
+---@param file file*
+---@param start number
+---@param stop number
+---@return string[]
+local function samplePayload(file, start, stop)
+	local samples = {}
+
+	for _, offset in ipairs(SAMPLE_OFFSETS) do
+		local at = start + offset
+		if at < stop then
+			samples[#samples + 1] = readAt(file, at, math.min(SAMPLE_BYTES, stop - at)) or ""
+		end
+	end
+
+	return samples
 end
 
 -- ────────────────────────────────────────────────────────────────
@@ -208,6 +312,10 @@ local function flac(file)
 		if last then break end
 	end
 
+	local total = sizeOf(file)
+	info.fingerprint = fingerprintOf("FLAC", info.duration,
+		samplePayload(file, math.min(at, total), total))
+
 	return info
 end
 
@@ -243,6 +351,7 @@ local function wav(file)
 	local total = sizeOf(file)
 	local bits = 0
 	local dataSize = nil
+	local dataOffset = nil
 
 	while at + 8 <= total do
 		local chunk = readAt(file, at, 8)
@@ -261,6 +370,7 @@ local function wav(file)
 			end
 		elseif id == "data" then
 			dataSize = length
+			dataOffset = body
 		elseif id == "LIST" and length >= 4 then
 			local kind = readAt(file, body, 4)
 			if kind == "INFO" then
@@ -293,6 +403,11 @@ local function wav(file)
 	if dataSize ~= nil and info.sampleRate > 0 and info.channels > 0 and bits > 0 then
 		info.duration = dataSize / (info.sampleRate * info.channels * (bits / 8))
 	end
+
+	local audioStart = dataOffset or total
+	local audioEnd = math.min(audioStart + (dataSize or 0), total)
+	info.fingerprint = fingerprintOf("WAV", info.duration,
+		samplePayload(file, audioStart, audioEnd))
 
 	if next(tags) ~= nil then info.tags = tags end
 
@@ -403,6 +518,7 @@ end
 ---@return number? duration
 ---@return number? sampleRate
 ---@return number? channels
+---@return number? audioStart
 local function mp3Duration(file, start, total)
 	local head = readAt(file, start, math.min(8192, total - start)) or ""
 	local at = 0
@@ -445,7 +561,7 @@ local function mp3Duration(file, start, total)
 				frame:byte(xingAt + 10), frame:byte(xingAt + 11))
 			if frames > 0 then
 				return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate,
-					found.channels
+					found.channels, start + found.offset
 			end
 		end
 	end
@@ -454,14 +570,46 @@ local function mp3Duration(file, start, total)
 		local frames = be32(frame:byte(51), frame:byte(52), frame:byte(53), frame:byte(54))
 		if frames > 0 then
 			return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate,
-				found.channels
+				found.channels, start + found.offset
 		end
 	end
 
 	-- With neither, the frames are counted: a stream of one bitrate could be worked out from its
 	-- size, but one whose bitrate varies cannot, and nothing before the end says which it is.
 	local frames = countFrames(file, start + found.offset, total)
-	return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate, found.channels
+	return frames * assert(found.samplesPerFrame) / found.sampleRate, found.sampleRate,
+		found.channels, start + found.offset
+end
+
+--- The audio ends where a trailing tag begins. ID3v1 and APEv2 can follow each other in either
+--- order, so strip whichever is last until neither is there.
+---@param file file*
+---@param start number
+---@param total number
+---@return number
+local function mp3AudioEnd(file, start, total)
+	local stop = total
+
+	while true do
+		if stop - start >= 128 and readAt(file, stop - 128, 3) == "TAG" then
+			stop = stop - 128
+		elseif stop - start >= 32 and readAt(file, stop - 32, 8) == "APETAGEX" then
+			local footer = readAt(file, stop - 32, 32)
+			if footer == nil or #footer < 32 then break end
+
+			local size = le32(footer:byte(13), footer:byte(14), footer:byte(15), footer:byte(16))
+			local flags = le32(footer:byte(21), footer:byte(22), footer:byte(23), footer:byte(24))
+			-- The size covers the footer; an optional header is another 32 bytes before the items.
+			local amount = size + (flags >= 0x80000000 and 32 or 0)
+			if amount < 32 or stop - amount < start then break end
+
+			stop = stop - amount
+		else
+			break
+		end
+	end
+
+	return stop
 end
 
 ---@param file file*
@@ -541,7 +689,7 @@ local function mp3(file)
 		end
 	end
 
-	local duration, sampleRate, channels = mp3Duration(file, at, total)
+	local duration, sampleRate, channels, audioStart = mp3Duration(file, at, total)
 
 	if id3Tags == nil then
 		-- ID3v1 lives in the last 128 bytes.
@@ -555,8 +703,10 @@ local function mp3(file)
 
 	if sampleRate == nil then return nil end
 
+	local first = audioStart or at
+
 	---@type treble.audio.Inspect
-	return {
+	local info = {
 		format = "MP3",
 		sampleRate = sampleRate,
 		channels = channels or 2,
@@ -564,6 +714,10 @@ local function mp3(file)
 		tags = id3Tags or nil,
 		hasPicture = hasPicture,
 	}
+	info.fingerprint = fingerprintOf("MP3", info.duration,
+		samplePayload(file, first, mp3AudioEnd(file, first, total)))
+
+	return info
 end
 
 -- ────────────────────────────────────────────────────────────────
@@ -615,6 +769,83 @@ local function opusTags(data)
 	end
 
 	return Tags.fromVorbisComments(comments, vendor), hasPicture
+end
+
+--- The audio packets are every packet after OpusHead and OpusTags, concatenated. They are not
+--- one run in the file: page headers sit between them and a packet can continue on the next
+--- page. The lacing tables map bytes of the concatenation back to the file, so a comment
+--- packet that grows and renumbers the pages after it leaves every audio byte where it was.
+---@param file file*
+---@param total number
+---@return string[]
+local function opusSamples(file, total)
+	---@type string[][]
+	local samples = {}
+	for _ = 1, #SAMPLE_OFFSETS do
+		samples[#samples + 1] = {}
+	end
+
+	local produced = 0
+	local packetIndex = 0
+	---@type number[]
+	local ranges = {}
+	local at = 0
+	local lastWindow = SAMPLE_OFFSETS[#SAMPLE_OFFSETS] + SAMPLE_BYTES
+
+	---@param offset number
+	---@param length number
+	local function take(offset, length)
+		local from = produced
+		produced = produced + length
+
+		for index, window in ipairs(SAMPLE_OFFSETS) do
+			local first = math.max(from, window)
+			local last = math.min(produced, window + SAMPLE_BYTES)
+			if first < last then
+				local part = readAt(file, offset + (first - from), last - first) or ""
+				samples[index][#samples[index] + 1] = part
+			end
+		end
+	end
+
+	while at + 27 <= total do
+		local header = readAt(file, at, 27)
+		if header == nil or #header < 27 or header:sub(1, 4) ~= "OggS" then break end
+
+		local segments = header:byte(27) or 0
+		local table = readAt(file, at + 27, segments) or ""
+		if #table < segments then break end
+
+		local payloadAt = at + 27 + segments
+		for index = 1, segments do
+			local length = table:byte(index) or 0
+			ranges[#ranges + 1] = payloadAt
+			ranges[#ranges + 1] = length
+			payloadAt = payloadAt + length
+
+			if length < 255 then
+				packetIndex = packetIndex + 1
+				if packetIndex > 2 then
+					for range = 1, #ranges, 2 do
+						take(ranges[range], ranges[range + 1])
+					end
+				end
+				ranges = {}
+			end
+		end
+
+		at = payloadAt
+		if produced >= lastWindow then break end
+	end
+
+	local result = {}
+	for index, window in ipairs(SAMPLE_OFFSETS) do
+		if window < produced then
+			result[#result + 1] = table.concat(samples[index])
+		end
+	end
+
+	return result
 end
 
 ---@param file file*
@@ -787,6 +1018,11 @@ function inspect.inspect(path)
 		if result == nil or not result.hasPicture then
 			local larger = opus(file, 65536)
 			if larger ~= nil and (result == nil or larger.hasPicture) then result = larger end
+		end
+
+		if result ~= nil then
+			result.fingerprint = fingerprintOf(result.format, result.duration,
+				opusSamples(file, sizeOf(file)))
 		end
 	end
 
