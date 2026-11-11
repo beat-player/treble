@@ -65,6 +65,30 @@ player:stop()
 Queued tracks run back to back without a gap, position and seeking come from the
 device clock, and `player.onTrackEnd` and `player.onError` report what happened.
 
+## Metadata
+
+A scan can ask a file what it is without opening a decoder:
+
+```lua
+local treble = require("treble")
+
+local info = assert(treble.Audio.inspect("album/01.flac"))
+print(info.format, info.duration, info.tags and info.tags.title)
+```
+
+`inspect` returns the format, sample rate, channels, duration and the text tags.
+`info.hasPicture` says whether cover art is attached; the picture bytes are not
+copied by a scan. Read them with `treble.Audio.tags` when a view needs them.
+
+`info.fingerprint` is 16 lowercase hex digits over the audio itself: the format,
+the duration in whole milliseconds, and 16 KiB of the payload at the start, at
+1 MiB and at 4 MiB. Tag edits, a changed picture, a rewritten comment and a moved
+or renamed file do not change it. A library can therefore keep ratings, play
+counts and hand-added playlist entries attached to the recording instead of to
+the path. It is a fingerprint, not a guarantee: two different recordings can
+collide, and a difference that falls outside the sampled windows is not seen.
+`fingerprint` is `nil` only when the audio payload cannot be read at all.
+
 ## Building
 
 The compressed formats are vendored C sources, so `build.lua` fetches them and
