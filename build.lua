@@ -16,7 +16,10 @@ local OGG_VERSION = "v1.3.6"
 local OPUS_VERSION = "v1.6.1"
 local OPUSFILE_VERSION = "v0.12"
 
-local CACHE_DIR = "../treble-native"
+-- A directory lde keeps across rebuilds and never bundles. An lde without it gets a dot directory
+-- beside the target, which a bundle also skips: a cache in a directory of its own name is a module
+-- directory, and every library cached in it, for every target, ships with the app.
+local CACHE_DIR = build.cacheDir or "../.treble-native"
 local CACHE_NAME = "treble"
 
 local isWindows = jit.os == "Windows"
