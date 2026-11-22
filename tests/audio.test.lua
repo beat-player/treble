@@ -44,6 +44,14 @@ test.it("opens an opus from a path", function()
 	test.equal(source.channels, 1)
 end)
 
+test.it("opens an m4a from a path", function()
+	local source = assert(audio.fromPath("tests/fixtures/tone.m4a"))
+
+	test.equal(source.sampleRate, 44100)
+	test.equal(source.channels, 2)
+	test.equal(source.frameCount, 44100)
+end)
+
 test.it("opens memory by sniffing its first bytes", function()
 	local source = assert(fromMemory(fixture.build({ sampleRate = 11025, frames = 64 })))
 

@@ -8,13 +8,14 @@ local build = require("lde-build")
 local bit = require("bit")
 
 -- Bump when the recipe changes in a way the cache key cannot see.
-local RECIPE_VERSION = 8
+local RECIPE_VERSION = 9
 
 local DR_MP3_VERSION = "mp3-0.7.3"
 local DR_FLAC_VERSION = "flac-0.13.3"
 local OGG_VERSION = "v1.3.6"
 local OPUS_VERSION = "v1.6.1"
 local OPUSFILE_VERSION = "v0.12"
+local FDK_AAC_VERSION = "v2.0.3"
 
 -- A directory lde keeps across rebuilds and never bundles. An lde without it gets a dot directory
 -- beside the target, which a bundle also skips: a cache in a directory of its own name is a module
@@ -46,6 +47,7 @@ local VENDORED = {
 	{ name = "ogg", repo = "xiph/ogg", tag = OGG_VERSION },
 	{ name = "opus", repo = "xiph/opus", tag = OPUS_VERSION },
 	{ name = "opusfile", repo = "xiph/opusfile", tag = OPUSFILE_VERSION },
+	{ name = "fdk-aac", repo = "mstorsjo/fdk-aac", tag = FDK_AAC_VERSION },
 }
 
 --- Where the extracted release tarball lands.
@@ -138,6 +140,28 @@ local OPUS_LISTS = {
 	{ file = "opus_sources.mk", names = { "OPUS_SOURCES", "OPUS_SOURCES_FLOAT" } },
 }
 
+--- FDK-AAC keeps one source list for the encoder and the decoder together. Only
+--- the decoder's groups are read, for the same reason the opus encoder sources
+--- are left out. The transport and system groups are part of the decoder too:
+--- libMpegTPDec parses the AudioSpecificConfig, and libDRCdec and libSACdec are
+--- reached from the decoder's USAC and MPEG Surround paths.
+local FDK_AAC_LISTS = {
+	{
+		file = "Makefile.am",
+		names = {
+			"AACDEC_SRC",
+			"ARITHCODING_SRC",
+			"DRCDEC_SRC",
+			"FDK_SRC",
+			"MPEGTPDEC_SRC",
+			"PCMUTILS_SRC",
+			"SACDEC_SRC",
+			"SBRDEC_SRC",
+			"SYS_SRC",
+		},
+	},
+}
+
 --- djb2, so any change to the recipe parts below builds a fresh library. A plain
 --- FNV-1a multiply would lose precision in a Lua double.
 ---@param text string
@@ -183,8 +207,8 @@ typedef uint64_t ogg_uint64_t;
 ]])
 end
 
---- Reads the C files out of one of upstream's makefile fragments, skipping the
---- per architecture lists that need flags this build does not pass.
+--- Reads the C and C++ files out of one of upstream's makefile fragments,
+--- skipping the per architecture lists that need flags this build does not pass.
 ---@param path string
 ---@param names string[]
 local function sourceList(path, names)
@@ -202,7 +226,10 @@ local function sourceList(path, names)
 		if header then
 			collecting = wanted[header] == true
 		elseif collecting then
-			local source = line:match("^(%S+%.c)")
+			-- The C++ sources must be tried first: a .cpp path also matches the
+			-- shorter .c pattern. Upstream indents the FDK-AAC lists, so leading
+			-- whitespace is part of the line.
+			local source = line:match("^%s*(%S+%.cpp)") or line:match("^%s*(%S+%.c)")
 			if source then
 				sources[#sources + 1] = source
 			end
@@ -215,6 +242,21 @@ end
 -- What Lua calls through ffi.load. An MSVC linked DLL exports nothing on its own,
 -- and its linker takes no wildcards, so the names are listed. Keeping this in step
 -- with the bindings is the same obligation the ELF version script has.
+--
+-- FDK-AAC's public header has a few more entry points (library info, ancillary
+-- data, free-bytes reporting); the bindings call only these, and exporting the
+-- rest would root code the linker could otherwise drop.
+local AAC_EXPORTED = {
+	"aacDecoder_Close",
+	"aacDecoder_ConfigRaw",
+	"aacDecoder_DecodeFrame",
+	"aacDecoder_Fill",
+	"aacDecoder_GetStreamInfo",
+	"aacDecoder_Open",
+	"aacDecoder_SetParam",
+}
+
+---@type string[]
 local EXPORTED = {
 	"op_channel_count",
 	"op_free",
@@ -254,6 +296,10 @@ local EXPORTED = {
 	"treble_mp3_tag_size",
 }
 
+for _, name in ipairs(AAC_EXPORTED) do
+	EXPORTED[#EXPORTED + 1] = name
+end
+
 ---@type string[]
 local objects = {}
 
@@ -274,18 +320,30 @@ local function compile(sources, flags)
 	end
 
 	for _, source in ipairs(sources) do
-		args[#args + 1] = source
-		objects[#objects + 1] = source:match("[^/]+$"):gsub("%.c$", ".o")
-	end
+		-- Upstream trees can hold sources with the same base name (FDK-AAC's
+		-- mdct.cpp and opus's mdct.c), and a shared object name would make the
+		-- compiler overwrite one object with the other. Naming each object here
+		-- keeps them apart; -o only takes one source, so each gets its own run.
+		local object = string.format("%03d-%s.o", #objects + 1, source:match("[^/]+$"))
+		objects[#objects + 1] = object
 
-	build:cc(args)
+		local invocation = {}
+		for i = 1, #args do
+			invocation[i] = args[i]
+		end
+		invocation[#invocation + 1] = source
+		invocation[#invocation + 1] = "-o"
+		invocation[#invocation + 1] = object
+
+		build:cc(invocation)
+	end
 end
 
 local shim = build:read("native/mp3.c") .. build:read("native/flac.c")
 if isMac then
 	shim = shim .. build:read("native/coreaudio.c")
 end
-local cacheKey = table.concat({ RECIPE_VERSION, DR_MP3_VERSION, DR_FLAC_VERSION, OGG_VERSION, OPUS_VERSION, OPUSFILE_VERSION, build.target, hash(shim) }, "-")
+local cacheKey = table.concat({ RECIPE_VERSION, DR_MP3_VERSION, DR_FLAC_VERSION, OGG_VERSION, OPUS_VERSION, OPUSFILE_VERSION, FDK_AAC_VERSION, build.target, hash(shim) }, "-")
 local cachedLibrary = string.format("%s/%s-%s-%s", CACHE_DIR, CACHE_NAME, cacheKey, libraryName)
 
 if build:exists(cachedLibrary) then
@@ -302,6 +360,7 @@ local drFlacDir = entryDir(VENDORED[2])
 local oggDir = entryDir(VENDORED[3])
 local opusDir = entryDir(VENDORED[4])
 local opusfileDir = entryDir(VENDORED[5])
+local fdkDir = entryDir(VENDORED[6])
 
 writeOggConfig(oggDir)
 
@@ -340,6 +399,41 @@ compile({
 	"-I" .. opusDir .. "/include",
 })
 
+-- FDK-AAC's decoder. The sources are C++ only in syntax: they use no
+-- exceptions, RTTI or standard library containers, so compiling them that way
+-- keeps libstdc++ and libc++ out of the library's NEEDED entries. --no-undefined
+-- and the tests catch a source that starts leaning on either.
+local fdkSources = {}
+for _, list in ipairs(FDK_AAC_LISTS) do
+	for _, source in ipairs(sourceList(fdkDir .. "/" .. list.file, list.names)) do
+		fdkSources[#fdkSources + 1] = fdkDir .. "/" .. source
+	end
+end
+
+local fdkFlags = {
+	"-fno-exceptions",
+	"-fno-rtti",
+	"-I" .. fdkDir .. "/libAACdec/include",
+	"-I" .. fdkDir .. "/libArithCoding/include",
+	"-I" .. fdkDir .. "/libDRCdec/include",
+	"-I" .. fdkDir .. "/libFDK/include",
+	"-I" .. fdkDir .. "/libMpegTPDec/include",
+	"-I" .. fdkDir .. "/libPCMutils/include",
+	"-I" .. fdkDir .. "/libSACdec/include",
+	"-I" .. fdkDir .. "/libSBRdec/include",
+	"-I" .. fdkDir .. "/libSYS/include",
+}
+
+if isAndroid then
+	-- The NDK defines __ANDROID__, which FDK reads as a signal to include
+	-- <log/log.h> and call liblog's android_errorWriteLog from two SBR paths.
+	-- The NDK does not ship that header, and the call only logs a warning, so
+	-- the macro is hidden from FDK rather than linking liblog for it.
+	fdkFlags[#fdkFlags + 1] = "-U__ANDROID__"
+end
+
+compile(fdkSources, fdkFlags)
+
 -- dr_mp3 and dr_flac behind the shims in src/native, copied in as native/*.c
 compile({ "native/mp3.c" }, { "-I" .. drMp3Dir })
 compile({ "native/flac.c" }, { "-I" .. drFlacDir })
@@ -350,8 +444,19 @@ if isMac then
 end
 
 -- Only these symbols are called from Lua. Hiding the rest lets the linker drop
--- every vendor function that nothing reaches, which is most of libopus.
-local EXPORTS = "{\n\tglobal:\n\t\ttreble_*;\n\t\top_*;\n\tlocal:\n\t\t*;\n};\n"
+-- every vendor function that nothing reaches, which is most of libopus and the
+-- FDK-AAC encoder that shares its source tree. The FDK decoder names are listed
+-- rather than matched, so its other public functions stay local too.
+local exports = { "{\n\tglobal:" }
+for _, name in ipairs(AAC_EXPORTED) do
+	exports[#exports + 1] = "\t\t" .. name .. ";"
+end
+exports[#exports + 1] = "\t\ttreble_*;"
+exports[#exports + 1] = "\t\top_*;"
+exports[#exports + 1] = "\tlocal:"
+exports[#exports + 1] = "\t\t*;"
+exports[#exports + 1] = "};\n"
+local EXPORTS = table.concat(exports, "\n")
 
 build:write("exports.map", EXPORTS)
 

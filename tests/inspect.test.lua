@@ -30,6 +30,9 @@ local TAGGED = {
 		rate = 48000 },
 	{ file = "tagged.wav", format = "WAV", title = "Wav Title", artist = "Wav Artist",
 		album = "Wav Album", track = 9, date = "2026", genre = "Wav Genre", picture = false },
+	{ file = "tagged.m4a", format = "AAC", title = "M4A Title", artist = "M4A Artist",
+		album = "M4A Album", track = 3, date = "2026", genre = "M4A Genre", picture = true,
+		channels = 2, seconds = 1 },
 }
 
 for _, case in ipairs(TAGGED) do
@@ -39,7 +42,7 @@ for _, case in ipairs(TAGGED) do
 
 		test.equal(info.format, case.format)
 		test.equal(info.sampleRate, case.rate or 44100, "the sample rate is in the container header")
-		test.equal(info.channels, 1)
+		test.equal(info.channels, case.channels or 1)
 		test.equal(info.hasPicture, case.picture)
 		test.falsy(tags.picture, "the scan does not copy the picture")
 
@@ -49,16 +52,24 @@ for _, case in ipairs(TAGGED) do
 		test.equal(tags.track, case.track)
 		test.equal(tags.date, case.date)
 		test.equal(tags.genre, case.genre)
-		test.truthy(near(info.duration, 0.25), "the duration is the file's, near enough")
+		test.truthy(near(info.duration, case.seconds or 0.25), "the duration is the file's, near enough")
 	end)
 end
 
-for _, name in ipairs({ "tone.mp3", "tone.flac", "tone.opus", "tone.wav" }) do
-	test.it("reads the properties of " .. name .. " with no tags", function()
-		local info = assert(audio.inspect(fixture(name)))
+local UNTAGGED = {
+	{ file = "tone.mp3" },
+	{ file = "tone.flac" },
+	{ file = "tone.opus" },
+	{ file = "tone.wav" },
+	{ file = "tone.m4a", channels = 2, seconds = 1 },
+}
 
-		test.equal(info.channels, 1)
-		test.truthy(near(info.duration, 0.25))
+for _, case in ipairs(UNTAGGED) do
+	test.it("reads the properties of " .. case.file .. " with no tags", function()
+		local info = assert(audio.inspect(fixture(case.file)))
+
+		test.equal(info.channels, case.channels or 1)
+		test.truthy(near(info.duration, case.seconds or 0.25))
 		test.falsy(info.tags, "there is no text tag to report")
 		test.falsy(info.hasPicture)
 	end)

@@ -31,6 +31,36 @@ local LATIN1 = 0
 local UTF16 = 1
 local UTF16_BE = 2
 
+-- The genre numbers an MP4 `gnre` atom stores are the ID3v1 ones, one based.
+local GENRES = {
+	"Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge", "Hip-Hop",
+	"Jazz", "Metal", "New Age", "Oldies", "Other", "Pop", "R&B", "Rap",
+	"Reggae", "Rock", "Techno", "Industrial", "Alternative", "Ska", "Death Metal", "Pranks",
+	"Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop", "Vocal", "Jazz+Funk", "Fusion", "Trance",
+	"Classical", "Instrumental", "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
+	"Alt. Rock", "Bass", "Soul", "Punk", "Space", "Meditative", "Instrumental Pop", "Instrumental Rock",
+	"Ethnic", "Gothic", "Darkwave", "Techno-Industrial", "Electronic", "Pop-Folk", "Eurodance", "Dream",
+	"Southern Rock", "Comedy", "Cult", "Gangsta Rap", "Top 40", "Christian Rap", "Pop/Funk", "Jungle",
+	"Native American", "Cabaret", "New Wave", "Psychedelic", "Rave", "Showtunes", "Trailer", "Lo-Fi",
+	"Tribal", "Acid Punk", "Acid Jazz", "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock",
+	"Folk", "Folk-Rock", "National Folk", "Swing", "Fast-Fusion", "Bebop", "Latin", "Revival",
+	"Celtic", "Bluegrass", "Avantgarde", "Gothic Rock", "Progressive Rock", "Psychedelic Rock",
+	"Symphonic Rock", "Slow Rock", "Big Band", "Chorus", "Easy Listening", "Acoustic", "Humour",
+	"Speech", "Chanson", "Opera", "Chamber Music", "Sonata", "Symphony", "Booty Bass", "Primus",
+	"Porn Groove", "Satire", "Slow Jam", "Club", "Tango", "Samba", "Folklore", "Ballad",
+	"Power Ballad", "Rhythmic Soul", "Freestyle", "Duet", "Punk Rock", "Drum Solo", "A Cappella",
+	"Euro-House", "Dance Hall", "Goa", "Drum & Bass", "Club-House", "Hardcore", "Terror", "Indie",
+	"BritPop", "Afro-Punk", "Polsk Punk", "Beat", "Christian Gangsta Rap", "Heavy Metal",
+	"Black Metal", "Crossover", "Contemporary Christian", "Christian Rock", "Merengue", "Salsa",
+	"Thrash Metal", "Anime", "JPop", "Synthpop", "Abstract", "Art Rock", "Baroque", "Bhangra",
+	"Big Beat", "Breakbeat", "Chillout", "Downtempo", "Dub", "EBM", "Eclectic", "Electro",
+	"Electroclash", "Emo", "Experimental", "Garage", "Global", "IDM", "Illbient", "Industro-Goth",
+	"Jam Band", "Krautrock", "Leftfield", "Lounge", "Math Rock", "New Romantic", "Nu-Breakz",
+	"Post-Punk", "Post-Rock", "Psytrance", "Shoegaze", "Space Rock", "Trop Rock", "World Music",
+	"Neoclassical", "Audiobook", "Audio Theatre", "Neue Deutsche Welle", "Podcast", "Indie Rock",
+	"G-Funk", "Dubstep", "Garage Rock", "Psybient",
+}
+
 --- Undoes ID3 unsynchronisation: every stored FF 00 stands for one FF.
 ---@param raw string
 ---@return string
@@ -425,6 +455,42 @@ function Tags.fromFlacComments(packed, count, vendor)
 	return Tags.fromVorbisComments(comments, vendor)
 end
 
+--- Applies one comment-shaped key. Vorbis comments and iTunes freeform atoms
+--- spell the same fields the same way, so both go through here.
+---@param tags treble.Tags
+---@param key string # Upper case
+---@param value string
+---@return boolean applied
+local function applyComment(tags, key, value)
+	if key == "TITLE" then
+		tags.title = value
+	elseif key == "ARTIST" then
+		tags.artist = tags.artist == nil and value or tags.artist .. ", " .. value
+	elseif key == "ALBUM" then
+		tags.album = value
+	elseif key == "ALBUMARTIST" or key == "ALBUM ARTIST" then
+		tags.albumArtist = value
+	elseif key == "TRACKNUMBER" then
+		tags.track, tags.trackCount = parseNumber(value)
+	elseif key == "TRACKTOTAL" or key == "TOTALTRACKS" then
+		tags.trackCount = tonumber(value) or tags.trackCount
+	elseif key == "DISCNUMBER" then
+		tags.disc = parseNumber(value)
+	elseif key == "DATE" or key == "YEAR" then
+		tags.date = value
+	elseif key == "GENRE" then
+		tags.genre = value
+	elseif key == "COMMENT" or key == "DESCRIPTION" then
+		tags.comment = value
+	elseif key == "METADATA_BLOCK_PICTURE" and tags.picture == nil then
+		tags.picture = Tags.fromPictureBlock(fromBase64(value))
+	else
+		return false
+	end
+
+	return true
+end
+
 --- Reads the "KEY=value" list an Ogg or FLAC stream carries.
 ---@param comments string[]
 ---@param vendor string?
@@ -437,32 +503,88 @@ function Tags.fromVorbisComments(comments, vendor)
 		local key, value = comment:match("^([^=]+)=(.*)$")
 
 		if key ~= nil then
-			key = key:upper()
-
-			if key == "TITLE" then
-				tags.title = value
-			elseif key == "ARTIST" then
-				tags.artist = tags.artist == nil and value or tags.artist .. ", " .. value
-			elseif key == "ALBUM" then
-				tags.album = value
-			elseif key == "ALBUMARTIST" or key == "ALBUM ARTIST" then
-				tags.albumArtist = value
-			elseif key == "TRACKNUMBER" then
-				tags.track, tags.trackCount = parseNumber(value)
-			elseif key == "TRACKTOTAL" or key == "TOTALTRACKS" then
-				tags.trackCount = tonumber(value) or tags.trackCount
-			elseif key == "DISCNUMBER" then
-				tags.disc = parseNumber(value)
-			elseif key == "DATE" or key == "YEAR" then
-				tags.date = value
-			elseif key == "GENRE" then
-				tags.genre = value
-			elseif key == "COMMENT" or key == "DESCRIPTION" then
-				tags.comment = value
-			elseif key == "METADATA_BLOCK_PICTURE" and tags.picture == nil then
-				tags.picture = Tags.fromPictureBlock(fromBase64(value))
-			end
+			applyComment(tags, key:upper(), value)
 		end
+	end
+
+	return tags
+end
+
+---@class treble.Tags.ItunesFields
+---@field title string?
+---@field artist string?
+---@field album string?
+---@field albumArtist string?
+---@field date string?
+---@field genre string?
+---@field genreIndex number? # A gnre atom's one based ID3v1 genre number
+---@field comment string?
+---@field vendor string?
+---@field track number?
+---@field trackCount number?
+---@field disc number?
+---@field picture treble.Tags.Picture?
+---@field freeform { name: string, value: string }[]
+
+-- Freeform names that have a home in treble.Tags. A file can carry both the
+-- plain atom and the freeform spelling; the plain atom is read first and the
+-- freeform only fills what is still missing.
+local FREEFORM_FIELDS = {
+	TITLE = "title",
+	ARTIST = "artist",
+	ALBUM = "album",
+	ALBUMARTIST = "albumArtist",
+	["ALBUM ARTIST"] = "albumArtist",
+	DATE = "date",
+	YEAR = "date",
+	GENRE = "genre",
+	COMMENT = "comment",
+	DESCRIPTION = "comment",
+}
+
+---@param tags treble.Tags
+---@param key string
+---@param value string
+local function applyFreeform(tags, key, value)
+	local field = FREEFORM_FIELDS[key]
+
+	if field ~= nil then
+		if tags[field] == nil then applyComment(tags, key, value) end
+	elseif key == "TRACKNUMBER" then
+		if tags.track == nil then applyComment(tags, key, value) end
+	elseif key == "TRACKTOTAL" or key == "TOTALTRACKS" then
+		if tags.trackCount == nil then applyComment(tags, key, value) end
+	elseif key == "DISCNUMBER" then
+		if tags.disc == nil then applyComment(tags, key, value) end
+	end
+end
+
+--- Turns the iTunes atoms of an MP4 movie into the tags treble reads.
+---@param fields treble.Tags.ItunesFields
+---@return treble.Tags
+function Tags.fromItunes(fields)
+	---@type treble.Tags
+	local tags = { vendor = fields.vendor }
+
+	tags.title = fields.title
+	tags.artist = fields.artist
+	tags.album = fields.album
+	tags.albumArtist = fields.albumArtist
+	tags.date = fields.date
+	tags.comment = fields.comment
+	tags.track = fields.track
+	tags.trackCount = fields.trackCount
+	tags.disc = fields.disc
+	tags.picture = fields.picture
+
+	if fields.genre ~= nil then
+		tags.genre = fields.genre
+	elseif fields.genreIndex ~= nil then
+		tags.genre = GENRES[fields.genreIndex]
+	end
+
+	for _, item in ipairs(fields.freeform or {}) do
+		applyFreeform(tags, item.name:upper(), item.value)
 	end
 
 	return tags

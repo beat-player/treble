@@ -112,6 +112,42 @@ test.it("reads INFO tags from a wav file", function()
 	test.equal(tags.genre, "Wav Genre")
 end)
 
+test.it("reads iTunes tags and the cover from an m4a file", function()
+	local tags = assert(audio.tags("tests/fixtures/tagged.m4a"))
+
+	test.equal(tags.title, "M4A Title")
+	test.equal(tags.artist, "M4A Artist")
+	test.equal(tags.albumArtist, "M4A Album Artist")
+	test.equal(tags.album, "M4A Album")
+	test.equal(tags.track, 3)
+	test.equal(tags.trackCount, 12)
+	test.equal(tags.disc, 1)
+	test.equal(tags.date, "2026")
+	test.equal(tags.genre, "M4A Genre")
+
+	test.truthy(tags.picture, "the m4a carries a picture")
+	test.equal(tags.picture.mime, "image/png")
+	test.equal(string.sub(tags.picture.data, 1, 4), "\137PNG", "the picture is the encoded image")
+	test.equal(#tags.picture.data, PNG_BYTES)
+end)
+
+test.it("maps an iTunes gnre number and freeform names", function()
+	local numeric = Tags.fromItunes({ genreIndex = 18 })
+	test.equal(numeric.genre, "Rock", "gnre stores the ID3v1 genre, one based")
+
+	local freeform = Tags.fromItunes({
+		freeform = {
+			{ name = "ALBUMARTIST", value = "Free Artist" },
+			{ name = "TRACKNUMBER", value = "9/10" },
+			{ name = "Unrelated", value = "ignored" },
+		},
+	})
+
+	test.equal(freeform.albumArtist, "Free Artist")
+	test.equal(freeform.track, 9)
+	test.equal(freeform.trackCount, 10)
+end)
+
 test.it("probes a file without reading its audio", function()
 	local probe = assert(audio.probe("tests/fixtures/tone.flac"))
 

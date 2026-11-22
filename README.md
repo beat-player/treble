@@ -22,12 +22,13 @@ AAudio alone and a desktop build contains just its own backend.
 
 ## Formats
 
-| Format   | Decoder     | Tags                      |
-| -------- | ----------- | ------------------------- |
-| WAV      | built in    | `INFO` chunks             |
-| FLAC     | dr_flac     | Vorbis comments, pictures |
-| MP3      | dr_mp3      | ID3v2, ID3v1, pictures    |
-| Ogg Opus | libopusfile | Vorbis comments, pictures |
+| Format          | Decoder     | Tags                      |
+| --------------- | ----------- | ------------------------- |
+| WAV             | built in    | `INFO` chunks             |
+| FLAC            | dr_flac     | Vorbis comments, pictures |
+| MP3             | dr_mp3      | ID3v2, ID3v1, pictures    |
+| Ogg Opus        | libopusfile | Vorbis comments, pictures |
+| AAC (MP4, .m4a) | FDK-AAC     | iTunes `ilst`, pictures   |
 
 A picture comes back as its MIME type and its raw bytes, to hand to an image
 library.
@@ -97,6 +98,7 @@ collide, and a difference that falls outside the sampled windows is not seen.
 ## Building
 
 The compressed formats are vendored C sources, so `build.lua` fetches them and
-compiles them when the package is installed. lde needs a C compiler on the PATH.
+compiles them when the package is installed. lde needs a C and C++ compiler on
+the PATH (FDK-AAC is C++, built without its standard library).
 
 See [ATTRIBUTIONS.md](./ATTRIBUTIONS.md) for what is vendored.

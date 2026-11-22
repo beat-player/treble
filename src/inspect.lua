@@ -10,6 +10,7 @@
 --   print(info.format, info.duration, info.tags.title, info.hasPicture)
 local bit = require("bit")
 local Tags = require("treble.tags")
+local Mp4 = require("treble.formats.mp4")
 
 ---@class treble.audio.Inspect
 ---@field format string
@@ -983,6 +984,46 @@ local function opus(file, limit)
 end
 
 -- ────────────────────────────────────────────────────────────────
+-- MP4 AAC
+-- ────────────────────────────────────────────────────────────────
+
+--- The sample table says where the audio bytes are, so the fingerprint reads
+--- them through it rather than through the mdat box. Tags and artwork live in
+--- moov, and moving that around does not move a single audio sample.
+---@param file file*
+---@return treble.audio.Inspect?
+---@return string? err
+local function mp4Aac(file)
+	local reader = Mp4.fileReader(file, sizeOf(file), false)
+	local parsed, err = Mp4.parse(reader, { pictures = false })
+	if parsed == nil then return nil, err end
+
+	local track = parsed.track
+	if track == nil then return nil, "MP4 file has no audio track" end
+
+	local samples = {}
+	for _, offset in ipairs(SAMPLE_OFFSETS) do
+		if offset < track.sampleBytes then
+			samples[#samples + 1] = Mp4.sampleRange(reader, track, offset, SAMPLE_BYTES)
+		end
+	end
+
+	---@type treble.audio.Inspect
+	local info = {
+		format = "AAC",
+		sampleRate = track.sampleRate,
+		channels = track.channels,
+		duration = track.sampleRate > 0 and track.frameCount / track.sampleRate or 0,
+		tags = useful(parsed.tags),
+		hasPicture = parsed.hasPicture,
+	}
+
+	info.fingerprint = fingerprintOf("AAC", info.duration, samples)
+
+	return info
+end
+
+-- ────────────────────────────────────────────────────────────────
 -- entry point
 -- ────────────────────────────────────────────────────────────────
 
@@ -999,18 +1040,21 @@ function inspect.inspect(path)
 		return nil, "Failed to open audio file: " .. tostring(err)
 	end
 
-	local magic = file:read(4) or ""
+	local magic = file:read(12) or ""
 	file:seek("set", 0)
 
+	---@type treble.audio.Inspect?
 	local result = nil
-	if magic == "fLaC" then
+	---@type string?
+	local resultErr = nil
+	if magic:sub(1, 4) == "fLaC" then
 		result = flac(file)
-	elseif magic == "RIFF" then
+	elseif magic:sub(1, 4) == "RIFF" then
 		result = wav(file)
 	elseif magic:sub(1, 3) == "ID3" or magic:sub(1, 2) == "\255\251"
 		or (magic:byte(1) == 0xFF and magic:byte(2) ~= nil and magic:byte(2) >= 0xE0) then
 		result = mp3(file)
-	elseif magic == "OggS" then
+	elseif magic:sub(1, 4) == "OggS" then
 		result = opus(file, 8192)
 		-- A cover can push the comment packet past the first head. The text still comes back
 		-- from the short read, but `hasPicture` needs the larger window to see its comment
@@ -1024,12 +1068,14 @@ function inspect.inspect(path)
 			result.fingerprint = fingerprintOf(result.format, result.duration,
 				opusSamples(file, sizeOf(file)))
 		end
+	elseif magic:sub(5, 8) == "ftyp" then
+		result, resultErr = mp4Aac(file)
 	end
 
 	file:close()
 
 	if result == nil then
-		return nil, "Unsupported or malformed audio file: " .. path
+		return nil, resultErr or ("Unsupported or malformed audio file: " .. path)
 	end
 
 	return result

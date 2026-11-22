@@ -296,6 +296,21 @@ local function wavDataAt(content)
 end
 
 -- ────────────────────────────────────────────────────────────────
+-- MP4
+-- ────────────────────────────────────────────────────────────────
+
+-- The sample table points into mdat, so the first audio byte is just past the
+-- box header.
+---@param content string
+---@return number 1 based
+local function mp4AudioAt(content)
+	local at = content:find("mdat", 1, true)
+	if at == nil then error("The fixture has no mdat box") end
+
+	return at + 4
+end
+
+-- ────────────────────────────────────────────────────────────────
 -- Ogg Opus
 -- ────────────────────────────────────────────────────────────────
 
@@ -497,6 +512,13 @@ test.it("keeps a FLAC fingerprint when a comment is added and padding resized", 
 	test.equal(fingerprint(variant), fingerprint(base), "metadata length does not move the audio")
 end)
 
+test.it("keeps an M4A fingerprint when its tags and movie header differ", function()
+	-- The two fixtures hold the same one second of AAC in different files: one
+	-- has iTunes tags, a cover and its moov in front, the other has neither.
+	test.equal(fingerprint(fixture("tagged.m4a")), fingerprint(fixture("tone.m4a")),
+		"tags, artwork and box order are not audio")
+end)
+
 test.it("keeps a WAV fingerprint when a LIST chunk moves the data", function()
 	local base = fixture("tagged.wav")
 	local variant = insertListChunk(base)
@@ -530,6 +552,7 @@ test.it("gives different fingerprints to different audio", function()
 		{ file = "tagged.flac", at = flacAudioAt, delta = 500 },
 		{ file = "tagged.wav", at = wavDataAt, delta = 500 },
 		{ file = "tagged.opus", at = opusAudioAt, delta = 20 },
+		{ file = "tagged.m4a", at = mp4AudioAt, delta = 500 },
 	}
 
 	for _, case in ipairs(cases) do

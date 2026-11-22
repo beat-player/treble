@@ -4,6 +4,7 @@ local Wav = require("treble.formats.wav")
 local Flac = require("treble.formats.flac")
 local Mp3 = require("treble.formats.mp3")
 local Opus = require("treble.formats.opus")
+local Aac = require("treble.formats.aac")
 local Inspect = require("treble.inspect")
 
 -- Enough to hold the magic bytes and, for opus, the header packet.
@@ -21,6 +22,7 @@ local FORMATS = {
 	{ name = "FLAC", isValid = Flac.isValid, fromPath = Flac.fromPath, fromMemory = Flac.fromMemory },
 	{ name = "MP3", isValid = Mp3.isValid, fromPath = Mp3.fromPath, fromMemory = Mp3.fromMemory },
 	{ name = "Opus", isValid = Opus.isValid, fromPath = Opus.fromPath, fromMemory = Opus.fromMemory },
+	{ name = "AAC", isValid = Aac.isValid, fromPath = Aac.fromPath, fromMemory = Aac.fromMemory },
 }
 
 ---@param content string

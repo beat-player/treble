@@ -4,14 +4,40 @@ local ffi = require("ffi")
 local Flac = require("treble.formats.flac")
 local Mp3 = require("treble.formats.mp3")
 local Opus = require("treble.formats.opus")
+local Aac = require("treble.formats.aac")
 
 local SampleBuffer = ffi.typeof("int16_t[?]")
 
 -- The fixtures are a 0.25s 440 Hz tone: 11025 frames at 44100 Hz as mp3, 12000
--- frames at 48000 Hz as opus.
+-- frames at 48000 Hz as opus. The m4a fixtures are one second of the same tone
+-- as stereo AAC.
 local TONE_SECONDS = 0.25
 local TONE_HZ = 440
 local TONE_CROSSINGS = TONE_HZ * TONE_SECONDS * 2
+
+local M4A_SECONDS = 1
+local M4A_FRAMES = 44100
+local M4A_CROSSINGS = TONE_HZ * M4A_SECONDS * 2
+
+---@param value number
+---@return string
+local function be16(value)
+	return string.char(math.floor(value / 256) % 256, value % 256)
+end
+
+---@param value number
+---@return string
+local function be32(value)
+	return string.char(math.floor(value / 16777216) % 256, math.floor(value / 65536) % 256,
+		math.floor(value / 256) % 256, value % 256)
+end
+
+---@param kind string
+---@param body string
+---@return string
+local function box(kind, body)
+	return be32(#body + 8) .. kind .. body
+end
 
 --- lde runs tests from the package root, but not from a fixed place, so try both.
 ---@param name string
@@ -230,6 +256,80 @@ test.it("decodes flac from memory", function()
 	source:close()
 end)
 
+test.it("decodes a whole m4a file", function()
+	local path = fixture("tagged.m4a")
+	local source = assert(Aac.fromPath(path))
+
+	test.equal(source.channels, 2)
+	test.equal(source.sampleRate, 44100)
+	-- The edit list trims the encoder's priming, so one second is one second.
+	test.equal(source.frameCount, M4A_FRAMES, "the duration follows the edit list")
+
+	local samples, frames = readAll(source)
+	test.equal(frames, source.frameCount)
+	test.truthy(isNear(crossings(samples, frames * source.channels), M4A_CROSSINGS, M4A_CROSSINGS * 0.1), "decode is the tone that went in")
+	source:close()
+end)
+
+test.it("decodes an m4a from memory", function()
+	local _, content = fixture("tone.m4a")
+	local source = assert(Aac.fromMemory(content:ref(), #content))
+
+	test.equal(source.channels, 2)
+	test.equal(source.sampleRate, 44100)
+	test.equal(source.frameCount, M4A_FRAMES)
+
+	local samples, frames = readAll(source)
+	test.equal(frames, source.frameCount)
+	test.truthy(isNear(crossings(samples, frames * source.channels), M4A_CROSSINGS, M4A_CROSSINGS * 0.1), "memory decode is the tone that went in")
+	source:close()
+end)
+
+test.it("seeks into an m4a exactly", function()
+	local path = fixture("tagged.m4a")
+	local source = assert(Aac.fromPath(path))
+	local samples = readAll(source)
+
+	local middle = 20000
+	test.truthy(source:seek(middle), "seek reports success")
+
+	local slice = SampleBuffer(512 * source.channels)
+	test.equal(readFrames(source, slice, 512), 512)
+
+	-- FDK's reset leaves the first frame's overlap state a rounding step away
+	-- from the continuous decode, so compare the samples rather than their bits.
+	local largest = 0
+	for i = 0, 511 * source.channels - 1 do
+		largest = math.max(largest, math.abs(slice[i] - samples[middle * source.channels + i]))
+	end
+	test.less(largest, 2, "the seek lands where the continuous decode did")
+	source:close()
+end)
+
+test.it("rejects an MP4 whose sound track is not AAC", function()
+	local alacEntry = box("alac", string.rep("\0", 6) .. be16(1) .. string.rep("\0", 8)
+		.. be16(2) .. be16(16) .. be16(0) .. be16(0) .. be32(44100 * 65536))
+
+	local stsd = box("stsd", "\0\0\0\0" .. be32(1) .. alacEntry)
+	local mdhd = box("mdhd", "\0\0\0\0" .. be32(0) .. be32(0) .. be32(44100) .. be32(0)
+		.. "\0\0\0\0")
+	local hdlr = box("hdlr", "\0\0\0\0" .. be32(0) .. "soun" .. string.rep("\0", 8))
+	local stts = box("stts", "\0\0\0\0" .. be32(0))
+	local stsc = box("stsc", "\0\0\0\0" .. be32(0))
+	local stco = box("stco", "\0\0\0\0" .. be32(0))
+
+	local stbl = box("stbl", stsd .. stts .. stsc .. stco)
+	local mdia = box("mdia", mdhd .. hdlr .. box("minf", stbl))
+	local moov = box("moov", box("trak", mdia))
+	local contentBuffer = buffer.new()
+	contentBuffer:put(box("ftyp", "M4A \0\0\0\0") .. moov)
+
+	local source, err = Aac.fromMemory(contentBuffer:ref(), #contentBuffer)
+	test.falsy(source)
+	test.truthy(err) ---@cast err -nil
+	test.includes(err, "Unsupported codec")
+end)
+
 test.it("plays an mp3 that does not state its length without scanning it", function()
 	local path = fixture("tone-plain.mp3")
 	local source = assert(Mp3.fromPath(path))
@@ -252,9 +352,11 @@ test.it("recognises which content belongs to which format", function()
 	local _, mp3 = fixture("tone.mp3")
 	local _, opus = fixture("tone.opus")
 	local _, flac = fixture("tone.flac")
+	local _, m4a = fixture("tone.m4a")
 	local mp3Content = mp3:get()
 	local opusContent = opus:get()
 	local flacContent = flac:get()
+	local m4aContent = m4a:get()
 
 	test.truthy(Flac.isValid(flacContent))
 	test.falsy(Flac.isValid(mp3Content), "an mp3 is not flac")
@@ -264,6 +366,10 @@ test.it("recognises which content belongs to which format", function()
 	test.truthy(Opus.isValid(opusContent))
 	test.falsy(Mp3.isValid(opusContent), "an ogg page is not an mp3")
 	test.falsy(Opus.isValid(mp3Content), "an mp3 is not an ogg opus stream")
+
+	test.truthy(Aac.isValid(m4aContent), "an m4a starts with an ftyp box")
+	test.falsy(Aac.isValid(mp3Content), "an mp3 is not an mp4")
+	test.falsy(Aac.isValid(flacContent), "flac is not an mp4")
 end)
 
 test.it("reports a file it cannot decode", function()

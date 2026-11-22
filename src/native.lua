@@ -18,8 +18,8 @@ local function findLibrary(name)
 	return nil
 end
 
---- The decoders build.lua compiles: dr_mp3, dr_flac, libogg, libopus and
---- libopusfile in one library.
+--- The decoders build.lua compiles: dr_mp3, dr_flac, libogg, libopus,
+--- libopusfile and the decoder half of fdk-aac in one library.
 ---@class treble.native
 ---@field path string
 ---@field lib ffi.namespace*
