@@ -9,11 +9,16 @@ A cross platform playback audio library for LuaJIT.
 
 ## Backends
 
-| Backend   | Windows | Linux | macOS |
-| --------- | ------- | ----- | ----- |
-| WASAPI    | ✅      | ❌    | ❌    |
-| ALSA      | ❌      | ✅    | ❌    |
-| CoreAudio | ❌      | ❌    | ✅    |
+| Backend   | Windows | Linux | macOS | Android |
+| --------- | ------- | ----- | ----- | ------- |
+| WASAPI    | ✅      | ❌    | ❌    | ❌      |
+| ALSA      | ❌      | ✅    | ❌    | ❌      |
+| CoreAudio | ❌      | ❌    | ✅    | ❌      |
+| AAudio    | ❌      | ❌    | ❌    | ✅      |
+
+Android playback uses AAudio, so it needs Android 8.0 (API 26) or newer. The
+backend is selected by the platform's feature flag, so an Android build contains
+AAudio alone and a desktop build contains just its own backend.
 
 ## Formats
 

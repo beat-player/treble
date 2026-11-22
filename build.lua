@@ -22,12 +22,16 @@ local OPUSFILE_VERSION = "v0.12"
 local CACHE_DIR = build.cacheDir or "../.treble-native"
 local CACHE_NAME = "treble"
 
-local isWindows = jit.os == "Windows"
+-- What the library is built for is the target's, not the machine building it: a cross build for
+-- Windows from Linux links a DLL, and an Android build links for the phone.
+local target = build.target
+local isAndroid = target:find("android", 1, true) ~= nil
+local isWindows = target:find("windows", 1, true) ~= nil or target:find("mingw", 1, true) ~= nil
 -- Windows has two toolchains in the wild: mingw, whose linker is GNU ld, and the
 -- clang that targets MSVC, which hands its arguments to lld-link or link.exe and
 -- rejects both -fPIC and the GNU linker options.
-local isMsvc = build.target:find("msvc") ~= nil
-local isMac = jit.os == "OSX"
+local isMsvc = target:find("msvc", 1, true) ~= nil
+local isMac = target:find("apple", 1, true) ~= nil or target:find("darwin", 1, true) ~= nil
 local libraryName = isWindows and "decoders.dll" or "decoders.so"
 
 ---@class treble.Vendored
@@ -384,6 +388,12 @@ else
 	-- crashes, which would turn a missing source file into a runtime fault.
 	if not isWindows then
 		linkArgs[#linkArgs + 1] = "-Wl,--no-undefined"
+
+		-- Android 15 devices may use 16 KiB pages, and every library an app loads
+		-- must be linked for them.
+		if isAndroid then
+			linkArgs[#linkArgs + 1] = "-Wl,-z,max-page-size=16384"
+		end
 
 		-- A version script is ELF's way of saying what a shared library exports.
 		-- macOS would need -exported_symbols_list and Windows a .def file.

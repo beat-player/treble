@@ -19,8 +19,18 @@
 ---@class treble.raw
 ---@field open fun(sampleRate: number, channels: number, device: string?): treble.OutputStream?, string?
 
+--- AAudio, where this is an Android app: Android reports itself as Linux, so what tells them apart
+--- is the backend being bundled -- only an Android build has it -- and the device having the
+--- library it calls.
+---@return treble.raw?
+local function aaudio()
+	local ok, backend = pcall(require, "treble.raw.aaudio")
+	if ok and backend.available() then return backend end
+	return nil
+end
+
 local output = (
-	jit.os == "Linux" and require("treble.raw.alsa")
+	jit.os == "Linux" and (aaudio() or require("treble.raw.alsa"))
 	or jit.os == "Windows" and require("treble.raw.wasapi")
 	or jit.os == "OSX" and require("treble.raw.coreaudio")
 	or error("Unsupported OS for audio playback: " .. jit.os)
