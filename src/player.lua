@@ -264,6 +264,13 @@ function Player:applyVolume(samples, count)
 		return
 	end
 
+	-- A gain of one or less cannot leave the sample range, and storing the product into the int16
+	-- array converts it there, so the loop is a multiply: it runs on every sample that plays.
+	if gain >= 0 and gain < 1 then
+		for i = 0, count - 1 do samples[i] = samples[i] * gain end
+		return
+	end
+
 	for i = 0, count - 1 do
 			-- Scaling past the sample range wraps the sign, which sounds like noise.
 			samples[i] = math.max(MIN_SAMPLE, math.min(MAX_SAMPLE, math.floor(samples[i] * gain)))

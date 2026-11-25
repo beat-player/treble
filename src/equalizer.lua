@@ -6,6 +6,8 @@
 -- The filters have nothing to do with the device: the caller names a sample rate when
 -- it processes a chunk, and a new rate or channel count resets the state. That is what
 -- lets one Player move between files without leaking a filter's history across them.
+local ffi = require("ffi")
+
 local abs = math.abs
 local cos = math.cos
 local floor = math.floor
@@ -27,13 +29,13 @@ local MAX_SAMPLE = 32767
 
 ---@class treble.Equalizer
 ---@field bands treble.Equalizer.Band[]
----@field coefficients number[][]?
+---@field coefficients ffi.cdata*? # double[count * 5]: b0, b1, b2, a1, a2 for each band that does anything
+---@field count number # How many bands the coefficients hold
 ---@field sampleRate number?
 ---@field channels number?
----@field x1 number[]
----@field x2 number[]
----@field y1 number[]
----@field y2 number[]
+---@field history ffi.cdata*? # double[channels * count * 4]: x1, x2, y1, y2 for each channel's band
+---@field scratch ffi.cdata*? # double[scratchSize]: a chunk while it goes through the bands
+---@field scratchSize number
 local Equalizer = {}
 Equalizer.__index = Equalizer
 
@@ -43,12 +45,12 @@ function Equalizer.new(bands)
 	local equalizer = setmetatable({
 	bands = {},
 	coefficients = nil,
+	count = 0,
 	sampleRate = nil,
 	channels = nil,
-	x1 = {},
-	x2 = {},
-	y1 = {},
-	y2 = {},
+	history = nil,
+	scratch = nil,
+	scratchSize = 0,
 	}, Equalizer)
 
 	if bands ~= nil then equalizer:setBands(bands) end
@@ -99,9 +101,8 @@ function Equalizer:isFlat()
 end
 
 function Equalizer:reset()
-	for at = 1, #self.x1 do
-			self.x1[at], self.x2[at], self.y1[at], self.y2[at] = 0, 0, 0, 0
-		end
+	local history = self.history
+	if history ~= nil then ffi.fill(history, ffi.sizeof(history)) end
 end
 
 ---@param bands treble.Equalizer.Band[]
@@ -136,16 +137,6 @@ local function buildCoefficients(bands, sampleRate)
 	return made
 end
 
----@param channels number
----@param count number
-local function clearState(equalizer, channels, count)
-	local size = channels * count
-	for at = 1, size do
-			equalizer.x1[at], equalizer.x2[at] = 0, 0
-			equalizer.y1[at], equalizer.y2[at] = 0, 0
-		end
-end
-
 ---@param sampleRate number
 ---@param channels number
 function Equalizer:configure(sampleRate, channels)
@@ -156,12 +147,25 @@ function Equalizer:configure(sampleRate, channels)
 
 	self.sampleRate = sampleRate
 	self.channels = channels
-	self.coefficients = buildCoefficients(self.bands, sampleRate)
-	clearState(self, channels, #self.coefficients)
+	local made = buildCoefficients(self.bands, sampleRate)
+	local count = #made
+	local coefficients = ffi.new("double[?]", max(1, count * 5))
+	for band = 1, count do
+			for at = 1, 5 do coefficients[(band - 1) * 5 + at - 1] = made[band][at] end
+		end
+	self.coefficients = coefficients
+	self.count = count
+	-- A new array is a zeroed one: the history starts over with the shape.
+	self.history = ffi.new("double[?]", max(1, channels * count * 4))
 end
 
 --- Applies the bands in place. The caller's samples stay int16 so the volume stage,
 --- the PCM tap, and the device all keep seeing the shape treble has already used.
+---
+--- This runs on every sample that plays, so it is laid out for the JIT: the chunk is taken into
+--- doubles once, each band of each channel is one loop over it with its coefficients and history
+--- in locals, and the result is rounded back once. Nothing in it allocates once the scratch has
+--- grown to the chunk size.
 ---@param samples ffi.cdata*
 ---@param frames number
 ---@param channels number
@@ -170,30 +174,39 @@ function Equalizer:process(samples, frames, channels, sampleRate)
 	if #self.bands == 0 or frames <= 0 or channels <= 0 then return end
 
 	self:configure(sampleRate, channels)
-	local coefficients = self.coefficients
-	local count = #coefficients
+	local count = self.count
 	if count == 0 then return end
 
-	local x1, x2, y1, y2 = self.x1, self.x2, self.y1, self.y2
+	local total = frames * channels
+	if self.scratchSize < total then
+		self.scratch = ffi.new("double[?]", total)
+		self.scratchSize = total
+	end
+	local scratch = assert(self.scratch)
+	for at = 0, total - 1 do scratch[at] = samples[at] end
 
-	for frame = 0, frames - 1 do
-			local base = frame * channels
-			for channel = 0, channels - 1 do
-					local x = samples[base + channel]
-					local lane = channel * count
-					for band = 1, count do
-							local c = coefficients[band]
-							local state = lane + band
-							local y = c[1] * x + c[2] * (x1[state] or 0) + c[3] * (x2[state] or 0)
-							-c[4] * (y1[state] or 0) - c[5] * (y2[state] or 0)
-							x2[state] = x1[state] or 0
-							x1[state] = x
-							y2[state] = y1[state] or 0
-							y1[state] = y
-							x = y
+	local coefficients = assert(self.coefficients)
+	local history = assert(self.history)
+	for channel = 0, channels - 1 do
+			for band = 0, count - 1 do
+					local c = band * 5
+					local b0, b1, b2 = coefficients[c], coefficients[c + 1], coefficients[c + 2]
+					local a1, a2 = coefficients[c + 3], coefficients[c + 4]
+					local h = (channel * count + band) * 4
+					local x1, x2, y1, y2 = history[h], history[h + 1], history[h + 2], history[h + 3]
+					for at = channel, total - 1, channels do
+							local x = scratch[at]
+							local y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+							x2, x1 = x1, x
+							y2, y1 = y1, y
+							scratch[at] = y
 						end
-					samples[base + channel] = max(MIN_SAMPLE, min(MAX_SAMPLE, floor(x + 0.5)))
+					history[h], history[h + 1], history[h + 2], history[h + 3] = x1, x2, y1, y2
 				end
+		end
+
+	for at = 0, total - 1 do
+			samples[at] = max(MIN_SAMPLE, min(MAX_SAMPLE, floor(scratch[at] + 0.5)))
 		end
 end
 

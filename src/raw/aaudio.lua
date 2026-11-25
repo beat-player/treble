@@ -352,6 +352,11 @@ function lib.open(sampleRate, channels, device)
 	if actualCapacity > 0 then
 		capacity = actualCapacity
 	end
+	-- The capacity is only what the buffer may grow to; the part that is used starts out at a few
+	-- bursts, which a writer has to top up every few milliseconds. Using all of it lets a writer
+	-- sleep for a good part of DEVICE_LATENCY_SECONDS between writes, which is what a phone
+	-- playing in the background wants.
+	library.AAudioStream_setBufferSizeInFrames(handle, capacity)
 
 	---@type treble.raw.aaudio.Stream
 	local stream = setmetatable({
