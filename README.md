@@ -95,6 +95,17 @@ the path. It is a fingerprint, not a guarantee: two different recordings can
 collide, and a difference that falls outside the sampled windows is not seen.
 `fingerprint` is `nil` only when the audio payload cannot be read at all.
 
+Tags can be written back into FLAC, Ogg Opus, Ogg Vorbis, MP3 and MP4/M4A files:
+
+```lua
+assert(treble.Audio.writeTags("album/01.flac", { title = "New title", track = 3, genre = false }))
+```
+
+A field left out stays as the file has it, `false` removes it, and a value sets it.
+Everything else in the file is kept: pictures, other tags and the audio, so the
+fingerprint does not change. The file is read whole and the new one replaces it
+through a temporary file beside it.
+
 ## Building
 
 The compressed formats are vendored C sources, so `build.lua` fetches them and

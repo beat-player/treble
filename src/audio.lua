@@ -149,4 +149,13 @@ end
 
 audio.inspect = Inspect.inspect
 
+--- Changes a file's tags in place: FLAC, Ogg Opus, Ogg Vorbis, MP3 and MP4/M4A.
+---@param path string
+---@param changes treble.TagChanges
+---@return boolean? ok
+---@return string? err
+function audio.writeTags(path, changes)
+	return require("treble.write").tags(path, changes)
+end
+
 return audio
