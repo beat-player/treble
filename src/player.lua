@@ -54,6 +54,9 @@ local STAGING_SECONDS = 0.25
 ---@field private framesWritten number # Cumulative, in the device timeline
 ---@field private isPaused boolean
 ---@field private isStopped boolean
+---@field private isSuspended boolean # The device was let go while paused, for play() to reopen
+---@field private lastDelay number # Device delay in frames, as the most recent update() read it
+---@field private pausedFrames number? # Device timeline position when playback was paused
 ---@field private pendingSeek number? # A seek asked for before the next track is adopted
 local Player = {}
 Player.__index = Player
@@ -82,6 +85,9 @@ function Player.new(opts)
 	framesWritten = 0,
 	isPaused = false,
 	isStopped = false,
+	isSuspended = false,
+	lastDelay = 0,
+	pausedFrames = nil,
 	pendingSeek = nil,
 	}, Player)
 
@@ -111,6 +117,14 @@ function Player:playedFrames()
 	local delay = self.stream ~= nil and self.stream:delay() or 0
 
 	return self.framesWritten - delay
+end
+
+--- The device delay in frames, taken from the stream during the most recent
+--- update(), so a caller that only wants the buffer depth does not have to reach the
+--- stream itself.
+---@return number frames
+function Player:latency()
+	return self.stream ~= nil and self.lastDelay or 0
 end
 
 --- Where a seek lands in a source, and the frames left after it. A source that cannot say how long
@@ -195,8 +209,11 @@ local function lengthKnown(track)
 end
 
 --- Fires onTrackEnd for each track the device has played past and lets it go.
-function Player:releaseHeard()
-	local played = self:playedFrames()
+---@param played number? # The device timeline position, when the caller already read it
+function Player:releaseHeard(played)
+	if played == nil then
+		played = self:playedFrames()
+	end
 	local track = self.playing
 
 	while track ~= nil and lengthKnown(track) and played >= track.startFrame + track.frames do
@@ -367,7 +384,9 @@ end
 
 --- One step of playback: pull, then push. Call it once per frame.
 function Player:update()
-	self:releaseHeard()
+	local stream = self.stream
+	self.lastDelay = stream ~= nil and stream:delay() or 0
+	self:releaseHeard(self.framesWritten - self.lastDelay)
 
 	if self.isStopped or self.isPaused then
 		return
@@ -409,6 +428,7 @@ function Player:update()
 		if self.stream:delay() == 0 then
 			self.stream:close()
 			self.stream = nil
+			self.lastDelay = 0
 		end
 	end
 end
@@ -495,6 +515,11 @@ function Player:next()
 	self.framesWritten = 0
 	self.stagedOffset = 0
 	self.stagedFrames = 0
+	self.lastDelay = 0
+	if self.isPaused then
+		-- Everything the device held was dropped, so a pause from here is at nought.
+		self.pausedFrames = 0
+	end
 
 	if following ~= nil then
 		-- The track being decoded was already on the device, so it starts over.
@@ -514,15 +539,24 @@ function Player:next()
 	return true
 end
 
---- Starts or resumes playback.
+--- Starts or resumes playback. A player that was suspended opens the device again
+--- from the position it kept, and a stream whose device was corked from underneath
+--- the player is resumed as well.
 function Player:play()
 	self.isStopped = false
+	self.isPaused = false
 
-	if self.isPaused then
-		self.isPaused = false
-		if self.stream ~= nil then
-			self.stream:setPaused(false)
-		end
+	local wasSuspended = self.isSuspended
+	self.isSuspended = false
+
+	if wasSuspended and self.stream == nil and self.playing ~= nil then
+		self:openStream(self.playing.source)
+	end
+
+	if self.stream ~= nil then
+		-- The flags are not the authority on whether the device runs: always tell it
+		-- to play, or a stream corked elsewhere would never be heard from again.
+		self.stream:setPaused(false)
 	end
 
 	return self
@@ -530,10 +564,69 @@ end
 
 --- Stops the device without giving up the queue or the position.
 function Player:pause()
+	local wasPaused = self.isPaused
 	self.isPaused = true
-	if self.stream ~= nil then
-		self.stream:setPaused(true)
+
+	local stream = self.stream
+	if stream ~= nil then
+		-- The device is still running here, so its delay says how much of what was
+		-- written has not been heard yet. suspend() resumes exactly from there.
+		if not wasPaused then
+			self.pausedFrames = self:playedFrames()
+		end
+
+		stream:setPaused(true)
 	end
+
+	return self
+end
+
+--- Lets go of the audio device while playback is paused, so a paused player does not
+--- keep the output open. The source stays at the exact position the device had
+--- played to, and play() opens the device again from there.
+function Player:suspend()
+	local stream = self.stream
+	if not self.isPaused or stream == nil then
+		return self
+	end
+
+	-- A paused device may no longer be able to say what it still holds, so the
+	-- position is the one recorded when it was paused.
+	---@type number
+	local played = self.pausedFrames or self:playedFrames()
+	self.pausedFrames = nil
+
+	local track = self.playing
+	if track ~= nil then
+		local heard = played - track.startFrame
+		if heard < 0 then
+			heard = 0
+		end
+
+		if lengthKnown(track) then
+			if heard > track.frames then
+				heard = track.frames
+			end
+		end
+
+		-- The frames the device had yet to play go away with the stream, so the
+		-- source goes back to where the device had got to before it is closed.
+		local frame = track.sourceStart + heard
+		---@type number
+		local remaining = 0
+		if lengthKnown(track) then
+			remaining = track.frames - heard
+		end
+
+		if not self:seekTo(frame, remaining, played) then
+			return self
+		end
+	end
+
+	stream:close()
+	self.stream = nil
+	self.lastDelay = 0
+	self.isSuspended = true
 
 	return self
 end
@@ -561,6 +654,9 @@ function Player:stop()
 	self.framesWritten = 0
 	self.isPaused = false
 	self.isStopped = true
+	self.isSuspended = false
+	self.lastDelay = 0
+	self.pausedFrames = nil
 	self.pendingSeek = nil
 
 	return self
@@ -596,21 +692,21 @@ function Player:close()
 	self.framesWritten = 0
 	self.isPaused = false
 	self.isStopped = true
+	self.isSuspended = false
+	self.lastDelay = 0
+	self.pausedFrames = nil
 end
 
----@param seconds number
-function Player:seek(seconds)
+--- Moves the current track's source head to a frame and starts the device timeline
+--- there again, dropping what the device still holds. The track behind it cannot
+--- keep the frames the move dropped, so it goes back to the queue.
+---@param frame number # A source frame of the playing track
+---@param frames number # Frames the track has left from there
+---@param base number # Device timeline frame the track restarts at
+---@return boolean ok
+function Player:seekTo(frame, frames, base)
 	local track = self.playing
-	if track == nil then
-		self.pendingSeek = seconds
-		return true
-	end
-
 	local source = track.source
-	-- Seconds are into the track, and the source is a decode of that whole track: an earlier
-	-- seek moved the source's read head but did not move the track's zero, so adding that head
-	-- here would make every seek after the first one jump by where it started.
-	local frame, frames = seekTarget(source, seconds)
 
 	if not source:seek(frame) then
 		return false
@@ -627,7 +723,7 @@ function Player:seek(seconds)
 	if carried ~= nil then
 		carried.source:seek(0)
 		carried.frames = carried.source.frameCount
-		carried.startFrame = source.frameCount - frame
+		carried.startFrame = base + frames
 		carried.sourceStart = 0
 		carried.isDone = false
 		self:requeue({ item = carried.source, isOwned = carried.isOwned})
@@ -636,15 +732,39 @@ function Player:seek(seconds)
 
 	track.sourceStart = frame
 	track.frames = frames
-	track.startFrame = 0
+	track.startFrame = base
 	-- The source reads on from the seek, so whatever it had run out of, it has data again.
 	track.isDone = false
 
-	self.framesWritten = 0
+	self.framesWritten = base
 	self.stagedOffset = 0
 	self.stagedFrames = 0
+	if self.isPaused then
+		-- The move dropped whatever the device held, so a pause from here is at the base.
+		self.pausedFrames = base
+	end
 
 	return true
+end
+
+---@param seconds number
+function Player:seek(seconds)
+	local track = self.playing
+	if track == nil then
+		self.pendingSeek = seconds
+		return true
+	end
+
+	-- Seconds are into the track, and the source is a decode of that whole track: an earlier
+	-- seek moved the source's read head but did not move the track's zero, so adding that head
+	-- here would make every seek after the first one jump by where it started.
+	local frame, frames = seekTarget(track.source, seconds)
+
+	-- A suspended player has no device timeline to restart, so it keeps the count it
+	-- remembered and only moves the decoder.
+	local base = self.isSuspended and self.framesWritten or 0
+
+	return self:seekTo(frame, frames, base)
 end
 
 --- Seconds into the current track, taken from the device: the frames it has played

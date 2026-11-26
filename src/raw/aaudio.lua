@@ -82,7 +82,7 @@ local SHARING_MODE_SHARED = 1
 
 local FORMAT_PCM_I16 = 1
 
-local PERFORMANCE_MODE_NONE = 10
+local PERFORMANCE_MODE_POWER_SAVING = 11
 
 local STATE_UNINITIALIZED = 0
 local STATE_STARTING = 3
@@ -327,7 +327,7 @@ function lib.open(sampleRate, channels, device)
 	library.AAudioStreamBuilder_setFormat(builder, FORMAT_PCM_I16)
 	library.AAudioStreamBuilder_setChannelCount(builder, channels)
 	library.AAudioStreamBuilder_setSampleRate(builder, sampleRate)
-	library.AAudioStreamBuilder_setPerformanceMode(builder, PERFORMANCE_MODE_NONE)
+	library.AAudioStreamBuilder_setPerformanceMode(builder, PERFORMANCE_MODE_POWER_SAVING)
 
 	local capacity = math.max(256, math.floor(sampleRate * DEVICE_LATENCY_SECONDS))
 	library.AAudioStreamBuilder_setBufferCapacityInFrames(builder, capacity)

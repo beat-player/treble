@@ -585,3 +585,105 @@ test.it("reports a device it cannot open", function()
 	test.falsy(ok)
 	test.includes(tostring(err), "WASAPI playback is not implemented")
 end)
+
+test.it("closes the device on suspend while paused and resumes at the same position", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+
+	local stream = created[1]
+	stream:play(500)
+	test.equal(player:playedFrames(), 500, "the device heard the first frames")
+	test.equal(player:position(), 500 / 8000)
+
+	player:pause()
+	player:suspend()
+
+	test.equal(stream.isClosed, true, "the output was released")
+	test.equal(player:latency(), 0, "no device is open")
+	test.equal(player:playedFrames(), 500, "the timeline position is remembered")
+	test.equal(player:position(), 500 / 8000, "and so is the track position")
+	test.equal(player:isPlaying(), false)
+
+	player:play()
+	test.equal(player:isPlaying(), true)
+
+	local resumed = created[2]
+	test.equal(resumed.sampleRate, 8000, "the device is opened with the same format")
+	test.equal(resumed.isPaused, false, "and told to play")
+
+	player:update()
+	test.equal(resumed.written[0], 500, "playback resumes from the remembered frame")
+end)
+
+test.it("does not let go of the device when suspend is called while playing", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+
+	player:suspend()
+
+	test.equal(created[1].isClosed, false, "a playing device stays open")
+	test.falsy(player.isSuspended)
+	test.equal(player:isPlaying(), true)
+end)
+
+test.it("resumes a stream that reports paused even when the flags say playing", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+
+	local stream = created[1]
+	stream:setPaused(true) -- corked behind the player's back
+	test.equal(stream.isPaused, true)
+
+	player:play()
+	test.equal(stream.isPaused, false, "play tells the device to run again")
+end)
+
+test.it("stops a suspended player and plays again from the top", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+	created[1]:play(500)
+	player:pause()
+	player:suspend()
+
+	player:stop()
+	test.equal(player:position(), 0)
+	test.equal(player:isPlaying(), false)
+	test.falsy(player.isSuspended)
+
+	player:play()
+	player:update()
+	test.equal(created[2].written[0], 0, "it starts the track over")
+end)
+
+test.it("reports the device delay read by the last update", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create})
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+	test.equal(player:latency(), 0, "the first update had no stream to ask")
+
+	local stream = created[1]
+	stream:play(500)
+	local expected = stream.queued
+	player:update()
+
+	test.equal(player:latency(), expected, "the delay the update saw")
+end)

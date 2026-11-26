@@ -71,6 +71,12 @@ player:stop()
 Queued tracks run back to back without a gap, position and seeking come from the
 device clock, and `player.onTrackEnd` and `player.onError` report what happened.
 
+`pause()` keeps the output open so resuming is instant. `suspend()`, on a paused
+player, closes the output instead: the source stays at the exact position the
+device had played to, and `play()` opens the device again from there. A paused app
+that calls `suspend()` therefore lets the audio device sleep. `latency()` reports
+the device delay in frames, as the last `update()` read it.
+
 ## Metadata
 
 A scan can ask a file what it is without opening a decoder:

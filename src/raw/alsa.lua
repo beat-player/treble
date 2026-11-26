@@ -63,6 +63,7 @@ local SOFT_RESAMPLE = 1
 
 local SND_PCM_STATE_RUNNING = 3
 local SND_PCM_STATE_DRAINING = 5
+local SND_PCM_STATE_PAUSED = 6
 
 -- Long enough that a busy frame does not starve the device, short enough that a
 -- seek does not have a quarter second of stale audio to throw away.
@@ -118,10 +119,11 @@ end
 --- A stream that is not running has nothing left to play, but the plugin can keep
 --- reporting frames it never played: after an underrun it says the buffer is still
 --- partly queued while the state sits at PREPARED. Only a running or draining
---- stream can be trusted to answer.
+--- stream can be trusted to answer. A paused stream still holds what it had queued,
+--- which is the position suspend() resumes from.
 function Stream:delay()
 	local state = self.library.snd_pcm_state(self.pcm)
-	if state ~= SND_PCM_STATE_RUNNING and state ~= SND_PCM_STATE_DRAINING then
+	if state ~= SND_PCM_STATE_RUNNING and state ~= SND_PCM_STATE_DRAINING and state ~= SND_PCM_STATE_PAUSED then
 		return 0
 	end
 
