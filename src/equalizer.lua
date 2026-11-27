@@ -1,7 +1,12 @@
--- A small graphic equalizer: one peaking biquad per band, run over decoded PCM before
+-- A small graphic equalizer: one biquad per band, run over decoded PCM before
 -- the volume stage. The coefficients follow the RBJ cookbook, which is the same shape
 -- most software equalizers use; keeping the state here means a changed band is heard
 -- on the next decoded chunk rather than only after a track restart.
+--
+-- A band is a peak by default, but the shelves and the pass filters are there too so a
+-- parametric profile (AutoEq, EqualizerAPO) can be dropped underneath the fixed faders.
+-- A preamp, in decibels, scales the chunk before the filters: boosting bands without it
+-- clips the int16 output.
 --
 -- The filters have nothing to do with the device: the caller names a sample rate when
 -- it processes a chunk, and a new rate or channel count resets the state. That is what
@@ -15,20 +20,51 @@ local max = math.max
 local min = math.min
 local pi = math.pi
 local sin = math.sin
+local sqrt = math.sqrt
 
 local MIN_GAIN = -24
 local MAX_GAIN = 24
 local MIN_FREQUENCY = 10
+local MIN_PREAMP = -24
+local MAX_PREAMP = 12
 local MIN_SAMPLE = -32768
 local MAX_SAMPLE = 32767
+local FLAT_GAIN = 0.01
+
+-- Biquad shapes. The cleaned bands carry the numeric code, so building the
+-- coefficients (and asking whether a band does anything) compares numbers, not
+-- strings. Nothing in the per-sample loop looks at the type at all: a type only
+-- changes which five coefficients the band gets.
+local TYPE_PEAK = 1
+local TYPE_LOWSHELF = 2
+local TYPE_HIGHSHELF = 3
+local TYPE_LOWPASS = 4
+local TYPE_HIGHPASS = 5
+
+local TYPE_CODES = {
+	peak = TYPE_PEAK,
+	lowshelf = TYPE_LOWSHELF,
+	highshelf = TYPE_HIGHSHELF,
+	lowpass = TYPE_LOWPASS,
+	highpass = TYPE_HIGHPASS,
+}
+
+--- A list of bands with an optional preamp on the same table: `bands.preamp`.
+---@class treble.Equalizer.Bands
+---@field preamp number? # dB applied before the filters, clamped -24..+12
+---@field [integer] treble.Equalizer.Band
 
 ---@class treble.Equalizer.Band
----@field frequency number # Centre, in hertz
----@field gain number # dB at the centre
----@field q number? # Bandwidth; 1.0 is the default for octave-spaced bands
+---@field frequency number # Centre or corner, in hertz
+---@field gain number # dB at the centre or corner; shelves and peaks only
+---@field q number? # Bandwidth; 1.0 for a peak, 0.707 for a shelf or pass filter
+---@field type string? # 'peak' (default), 'lowshelf', 'highshelf', 'lowpass' or 'highpass'
+---@field kind number? # Numeric type code, filled in when the bands are copied
 
 ---@class treble.Equalizer
 ---@field bands treble.Equalizer.Band[]
+---@field preamp number # dB applied before the filters, clamped -24..+12
+---@field preampGain number? # Linear form of preamp, built with the coefficients
 ---@field coefficients ffi.cdata*? # double[count * 5]: b0, b1, b2, a1, a2 for each band that does anything
 ---@field count number # How many bands the coefficients hold
 ---@field sampleRate number?
@@ -39,11 +75,13 @@ local MAX_SAMPLE = 32767
 local Equalizer = {}
 Equalizer.__index = Equalizer
 
----@param bands treble.Equalizer.Band[]?
+---@param bands treble.Equalizer.Bands?
 ---@return treble.Equalizer
 function Equalizer.new(bands)
 	local equalizer = setmetatable({
 	bands = {},
+	preamp = 0,
+	preampGain = 1,
 	coefficients = nil,
 	count = 0,
 	sampleRate = nil,
@@ -68,7 +106,10 @@ end
 --- Replaces the bands and drops the history: a coefficient built for the old shape
 --- cannot describe the new one, and carrying a stale ring through a preset change
 --- makes the first chunk ring.
----@param bands treble.Equalizer.Band[]
+---
+--- `bands.preamp` is the optional hash field, so a profile with a preamp and no
+--- bands still has something to do.
+---@param bands treble.Equalizer.Bands
 function Equalizer:setBands(bands)
 	local clean = {}
 	for at = 1, #bands do
@@ -77,25 +118,38 @@ function Equalizer:setBands(bands)
 				local frequency = number(band.frequency, 0)
 				local gain = number(band.gain, 0)
 				if frequency > 0 then
+					local kind = TYPE_CODES[band.type] or TYPE_PEAK
+					local fallbackQ = kind == TYPE_PEAK and 1.0 or 0.707
 					clean[#clean + 1] = {
 					frequency = max(MIN_FREQUENCY, frequency),
 					gain = max(MIN_GAIN, min(MAX_GAIN, gain)),
-					q = max(0.1, number(band.q, 1.0)),
+					q = max(0.1, number(band.q, fallbackQ)),
+					type = band.type,
+					kind = kind,
 					}
 				end
 			end
 		end
 	self.bands = clean
+	self.preamp = max(MIN_PREAMP, min(MAX_PREAMP, number(bands.preamp, 0)))
+	self.preampGain = nil
 	self.sampleRate = nil
 	self.channels = nil
 	self.coefficients = nil
 	self:reset()
 end
 
+--- True when nothing about the equalizer would change a sample: every band flat
+--- and no preamp. A band with no gain still counts if it is a pass filter, and a
+--- preamp alone counts, because each of those does something.
 ---@return boolean
 function Equalizer:isFlat()
+	if self.preamp ~= 0 then return false end
+
 	for at = 1, #self.bands do
-			if abs(self.bands[at].gain) >= 0.01 then return false end
+			local band = self.bands[at]
+			if band.kind == TYPE_LOWPASS or band.kind == TYPE_HIGHPASS then return false end
+			if abs(band.gain) >= FLAT_GAIN then return false end
 		end
 	return true
 end
@@ -105,6 +159,7 @@ function Equalizer:reset()
 	if history ~= nil then ffi.fill(history, ffi.sizeof(history)) end
 end
 
+--- One row per band that changes something, already normalised by a0.
 ---@param bands treble.Equalizer.Band[]
 ---@param sampleRate number
 ---@return number[][]
@@ -114,21 +169,60 @@ local function buildCoefficients(bands, sampleRate)
 
 	for at = 1, #bands do
 			local band = bands[at]
-			if abs(band.gain) >= 0.01 and band.frequency < nyquist * 0.95 then
+			local kind = band.kind or TYPE_PEAK
+			-- A pass filter has no gain to be flat, so it is never skipped for one.
+			local silent = kind ~= TYPE_LOWPASS and kind ~= TYPE_HIGHPASS
+				and abs(band.gain) < FLAT_GAIN
+			if not silent and band.frequency < nyquist * 0.95 then
 				local gain = band.gain
 				local frequency = band.frequency
 				local q = band.q or 1.0
-				local a = 10 ^ (gain / 40)
 				local omega = 2 * pi * frequency / sampleRate
 				local alpha = sin(omega) / (2 * q)
 				local cosOmega = cos(omega)
 
-				local b0 = 1 + alpha * a
-				local b1 = -2 * cosOmega
-				local b2 = 1 - alpha * a
-				local a0 = 1 + alpha / a
-				local a1 = -2 * cosOmega
-				local a2 = 1 - alpha / a
+				local b0, b1, b2, a0, a1, a2
+				if kind == TYPE_LOWPASS then
+					b0 = (1 - cosOmega) / 2
+					b1 = 1 - cosOmega
+					b2 = (1 - cosOmega) / 2
+					a0 = 1 + alpha
+					a1 = -2 * cosOmega
+					a2 = 1 - alpha
+				elseif kind == TYPE_HIGHPASS then
+					b0 = (1 + cosOmega) / 2
+					b1 = -(1 + cosOmega)
+					b2 = (1 + cosOmega) / 2
+					a0 = 1 + alpha
+					a1 = -2 * cosOmega
+					a2 = 1 - alpha
+				else
+					local a = 10 ^ (gain / 40)
+					if kind == TYPE_LOWSHELF then
+						local sqrtA = sqrt(a)
+						b0 = a * ((a + 1) - (a - 1) * cosOmega + 2 * sqrtA * alpha)
+						b1 = 2 * a * ((a - 1) - (a + 1) * cosOmega)
+						b2 = a * ((a + 1) - (a - 1) * cosOmega - 2 * sqrtA * alpha)
+						a0 = (a + 1) + (a - 1) * cosOmega + 2 * sqrtA * alpha
+						a1 = -2 * ((a - 1) + (a + 1) * cosOmega)
+						a2 = (a + 1) + (a - 1) * cosOmega - 2 * sqrtA * alpha
+					elseif kind == TYPE_HIGHSHELF then
+						local sqrtA = sqrt(a)
+						b0 = a * ((a + 1) + (a - 1) * cosOmega + 2 * sqrtA * alpha)
+						b1 = -2 * a * ((a - 1) + (a + 1) * cosOmega)
+						b2 = a * ((a + 1) + (a - 1) * cosOmega - 2 * sqrtA * alpha)
+						a0 = (a + 1) - (a - 1) * cosOmega + 2 * sqrtA * alpha
+						a1 = 2 * ((a - 1) - (a + 1) * cosOmega)
+						a2 = (a + 1) - (a - 1) * cosOmega - 2 * sqrtA * alpha
+					else
+						b0 = 1 + alpha * a
+						b1 = -2 * cosOmega
+						b2 = 1 - alpha * a
+						a0 = 1 + alpha / a
+						a1 = -2 * cosOmega
+						a2 = 1 - alpha / a
+					end
+				end
 
 				made[#made + 1] = { b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0}
 			end
@@ -147,6 +241,7 @@ function Equalizer:configure(sampleRate, channels)
 
 	self.sampleRate = sampleRate
 	self.channels = channels
+	self.preampGain = 10 ^ (self.preamp / 20)
 	local made = buildCoefficients(self.bands, sampleRate)
 	local count = #made
 	local coefficients = ffi.new("double[?]", max(1, count * 5))
@@ -171,11 +266,12 @@ end
 ---@param channels number
 ---@param sampleRate number
 function Equalizer:process(samples, frames, channels, sampleRate)
-	if #self.bands == 0 or frames <= 0 or channels <= 0 then return end
+	if frames <= 0 or channels <= 0 then return end
 
 	self:configure(sampleRate, channels)
 	local count = self.count
-	if count == 0 then return end
+	local preamp = self.preampGain or 1
+	if count == 0 and preamp == 1 then return end
 
 	local total = frames * channels
 	if self.scratchSize < total then
@@ -183,27 +279,33 @@ function Equalizer:process(samples, frames, channels, sampleRate)
 		self.scratchSize = total
 	end
 	local scratch = assert(self.scratch)
-	for at = 0, total - 1 do scratch[at] = samples[at] end
+	if preamp == 1 then
+		for at = 0, total - 1 do scratch[at] = samples[at] end
+	else
+		for at = 0, total - 1 do scratch[at] = samples[at] * preamp end
+	end
 
-	local coefficients = assert(self.coefficients)
-	local history = assert(self.history)
-	for channel = 0, channels - 1 do
-			for band = 0, count - 1 do
-					local c = band * 5
-					local b0, b1, b2 = coefficients[c], coefficients[c + 1], coefficients[c + 2]
-					local a1, a2 = coefficients[c + 3], coefficients[c + 4]
-					local h = (channel * count + band) * 4
-					local x1, x2, y1, y2 = history[h], history[h + 1], history[h + 2], history[h + 3]
-					for at = channel, total - 1, channels do
-							local x = scratch[at]
-							local y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-							x2, x1 = x1, x
-							y2, y1 = y1, y
-							scratch[at] = y
-						end
-					history[h], history[h + 1], history[h + 2], history[h + 3] = x1, x2, y1, y2
-				end
-		end
+	if count > 0 then
+		local coefficients = assert(self.coefficients)
+		local history = assert(self.history)
+		for channel = 0, channels - 1 do
+				for band = 0, count - 1 do
+						local c = band * 5
+						local b0, b1, b2 = coefficients[c], coefficients[c + 1], coefficients[c + 2]
+						local a1, a2 = coefficients[c + 3], coefficients[c + 4]
+						local h = (channel * count + band) * 4
+						local x1, x2, y1, y2 = history[h], history[h + 1], history[h + 2], history[h + 3]
+						for at = channel, total - 1, channels do
+								local x = scratch[at]
+								local y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+								x2, x1 = x1, x
+								y2, y1 = y1, y
+								scratch[at] = y
+							end
+						history[h], history[h + 1], history[h + 2], history[h + 3] = x1, x2, y1, y2
+					end
+			end
+	end
 
 	for at = 0, total - 1 do
 			samples[at] = max(MIN_SAMPLE, min(MAX_SAMPLE, floor(scratch[at] + 0.5)))

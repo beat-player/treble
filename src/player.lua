@@ -808,29 +808,31 @@ function Player:isFinished()
 	return delay == 0
 end
 
---- Configures the graphic equalizer. An empty list, or every band at zero, is the
---- path the player takes when there is nothing to filter. The bands are copied so a
---- caller can change its own table without changing what is already playing.
----@param bands treble.Equalizer.Band[]?
+--- Configures the equalizer. An empty list with no preamp, or every band at zero,
+--- is the path the player takes when there is nothing to filter; a preamp alone and
+--- a pass filter alone both keep the equalizer in the chain. The bands are copied so
+--- a caller can change its own table without changing what is already playing.
+---@param bands treble.Equalizer.Bands?
 ---@return treble.Player
 function Player:setEqualizer(bands)
-	if bands == nil or #bands == 0 then
+	if bands == nil then
 		self.equalizer = nil
 		return self
 	end
 
-	local copy = {}
+	local copy = { preamp = bands.preamp }
 	for at = 1, #bands do
 			local band = bands[at]
 			copy[#copy + 1] = {
 			frequency = band.frequency,
 			gain = band.gain,
 			q = band.q,
+			type = band.type,
 			}
 		end
 
 	local equalizer = Equalizer.new(copy)
-	self.equalizer = equalizer:isFlat() and nil or equalizer
+	if equalizer:isFlat() then self.equalizer = nil else self.equalizer = equalizer end
 	return self
 end
 

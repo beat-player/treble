@@ -77,6 +77,37 @@ device had played to, and `play()` opens the device again from there. A paused a
 that calls `suspend()` therefore lets the audio device sleep. `latency()` reports
 the device delay in frames, as the last `update()` read it.
 
+## Equalizer
+
+`Player:setEqualizer` replaces the filters on the decoded PCM before the volume
+stage; pass `nil` to remove them.
+
+```lua
+player:setEqualizer({
+	preamp = -4,
+	{ frequency = 60, gain = 5, q = 1.0, type = "peak" },
+	{ frequency = 105, gain = 5, q = 0.7, type = "lowshelf" },
+	{ frequency = 10000, gain = -3, q = 0.7, type = "highshelf" },
+	{ frequency = 20000, gain = 0, q = 0.7, type = "highpass" },
+})
+```
+
+Each band is a biquad built from the RBJ cookbook. `type` is `peak` (the default),
+`lowshelf`, `highshelf`, `lowpass` or `highpass`. A peak or shelf uses `gain`, in dB
+clamped to ±24, and `q`, which defaults to 1.0 for a peak and 0.707 otherwise.
+A low or high pass has no gain and passes `q` the same way. Bands at or above 0.95
+times the Nyquist frequency are left out, and a peak or shelf at zero gain is
+skipped; a pass filter is never skipped.
+
+`preamp`, in dB clamped to -24..+12, scales the chunk before the filters, which is
+how a profile that boosts bands avoids clipping. A preamp on its own keeps the
+equalizer active, and so does a pass filter with no gain.
+
+An imported parametric profile (AutoEq, EqualizerAPO) can be expressed with the
+same table: a `Preamp:` line becomes `preamp`, and `PK`, `LSC`/`LS`, `HSC`/`HS`,
+`LP`/`LPQ` and `HP`/`HPQ` lines become `peak`, `lowshelf`, `highshelf`, `lowpass`
+and `highpass` bands.
+
 ## Metadata
 
 A scan can ask a file what it is without opening a decoder:
