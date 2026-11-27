@@ -376,6 +376,41 @@ test.it("keeps a seek made before the first update", function()
 	test.equal(stream.written[0], 4000, "the first write starts at the seeked frame instead of nought")
 end)
 
+test.it("keeps a source already at a held seek's frame when it is adopted", function()
+	local seeks = {}
+	local frames = 8000
+	local source = {
+		channels = 1,
+		sampleRate = 8000,
+		frameCount = frames,
+		readPos = 4000,
+		seek = function(self, frame)
+			seeks[#seeks + 1] = frame
+			self.readPos = frame
+			return true
+		end,
+		read = function(self, out, count)
+			local got = math.min(count, frames - self.readPos)
+			for at = 0, got - 1 do out[at] = self.readPos + at end
+			self.readPos = self.readPos + got
+			return got
+		end,
+		close = function() end
+	}
+	local create, created = factory()
+	local player = Player.new({ stream = create })
+
+	-- A prefetch source already decoding at the held place: adopting it must not rewind the
+	-- source to nought first, which would throw that audio away and leave the fill with nothing.
+	player:enqueue(source)
+	player:seek(0.5)
+	player:update()
+
+	test.equal(#seeks, 1, "the held seek is the only move")
+	test.equal(seeks[1], 4000, "it lands on the frame the source already holds")
+	test.equal(created[1].written[0], 4000, "the first write comes from that frame")
+end)
+
 test.it("reports the duration of the current track", function()
 	local player = Player.new({ stream = factory()})
 	player:enqueue(ramp({ frames = 22050, sampleRate = 44100}))
@@ -686,4 +721,49 @@ test.it("reports the device delay read by the last update", function()
 	player:update()
 
 	test.equal(player:latency(), expected, "the delay the update saw")
+end)
+
+test.it("resumes at a seek made while paused, not where it was paused", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create })
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+	local stream = created[1]
+	stream:play(500)
+	test.equal(player:position(), 500 / 8000, "the device heard the first frames")
+
+	player:pause()
+	player:seek(0.5)
+	test.equal(player:position(), 0.5, "the paused position follows the seek")
+
+	local before = stream.writtenFrames
+	player:play()
+	player:update()
+	test.equal(player:position(), 0.5, "playback resumes at the seek")
+	test.equal(stream.written[before], 4000, "the device hears the seek target")
+end)
+
+test.it("resumes at a seek made while suspended, not where it was paused", function()
+	local create, created = factory()
+	local player = Player.new({ stream = create })
+
+	player:enqueue(ramp({ frames = 8000 }))
+	player:play()
+	player:update()
+	local stream = created[1]
+	stream:play(500)
+	player:pause()
+	player:suspend()
+	test.equal(stream.isClosed, true, "the device was released")
+
+	player:seek(0.5)
+	test.equal(player:position(), 0.5, "the suspended position follows the seek")
+
+	player:play()
+	local resumed = created[2]
+	player:update()
+	test.equal(player:position(), 0.5, "playback resumes at the seek")
+	test.equal(resumed.written[0], 4000, "the reopened device hears the seek target")
 end)

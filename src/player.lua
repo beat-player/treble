@@ -156,10 +156,17 @@ function Player:adopt()
 	local source = queued.item
 	local isOwned = queued.isOwned
 
+	-- A seek made while no track was adopted is held until this one is: it is what lets a queue
+	-- order change carry on at the same point instead of starting the source at nought.
+	local pendingSeek = self.pendingSeek
+	self.pendingSeek = nil
+
 	if type(source) == "string" then
 		source = assert(Audio.fromPath(source))
 		isOwned = true
-	elseif not isOwned then
+	elseif not isOwned and pendingSeek == nil then
+		-- Rewinding is only for a source that may have been read before: a held seek places it
+		-- itself, and a source already decoded at that place (a prefetch ring) keeps its audio.
 		source:seek(0)
 	end
 	---@cast source treble.Source
@@ -174,10 +181,6 @@ function Player:adopt()
 	isDone = false,
 	}
 
-	-- A seek made while no track was adopted is held until this one is: it is what lets a queue
-	-- order change carry on at the same point instead of starting the source at nought.
-	local pendingSeek = self.pendingSeek
-	self.pendingSeek = nil
 	if pendingSeek ~= nil then
 		local frame, frames = seekTarget(source, pendingSeek)
 		if source:seek(frame) then
